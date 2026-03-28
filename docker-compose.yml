@@ -1,0 +1,52 @@
+# Host URLs (defaults below). After editing app code: docker compose up -d --build
+#   Web API: http://localhost:28080  — /docs, /health, /api/v1
+#   Postgres: localhost:45432  |  Redis: localhost:26379
+services:
+  app:
+    build: .
+    ports:
+      # Default 28080; override: APP_PORT=8080 docker compose up -d
+      - "${APP_PORT:-28080}:8000"
+    environment:
+      DATABASE_URL: postgresql://authfortress:authfortress@postgres:5432/authfortress
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-change-me-use-long-random-secret-key-32chars}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: authfortress
+      POSTGRES_PASSWORD: authfortress
+      POSTGRES_DB: authfortress
+    ports:
+      # Default 45432 (host); override: PG_PORT=5432 docker compose up -d
+      - "${PG_PORT:-45432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authfortress -d authfortress"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      # Default 26379 (host); override: REDIS_PORT=6379 docker compose up -d
+      - "${REDIS_PORT:-26379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:

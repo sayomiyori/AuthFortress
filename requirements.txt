@@ -1,0 +1,19 @@
+# Python 3.12+ recommended (wheels for pydantic-core may be missing on 3.14+).
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg2-binary==2.9.10
+pydantic==2.10.3
+pydantic-settings==2.6.1
+passlib[bcrypt]==1.7.4
+bcrypt==4.2.1
+PyJWT==2.10.1
+redis==5.2.1
+python-multipart==0.0.20
+email-validator==2.2.0
+
+# dev / test
+pytest==8.3.4
+httpx==0.28.1
+fakeredis[lua]==2.26.2
