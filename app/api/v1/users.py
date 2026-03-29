@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
+from app.core.rbac import require_min_role, require_superadmin, role_rank
+from app.core.security import get_current_user
 from app.db.session import get_db
 from app.models.user import User, UserRole
-from app.core.security import get_current_user, require_role
 from app.services.password import hash_password, validate_password_strength
 
 router = APIRouter()
@@ -41,7 +42,7 @@ class UserUpdateAdmin(BaseModel):
 @router.get("", response_model=list[UserOut])
 def list_users(
     db: Session = Depends(get_db),
-    _: User = Depends(require_role(UserRole.admin)),
+    _: User = Depends(require_min_role(UserRole.admin)),
     skip: int = 0,
     limit: int = 50,
 ):
@@ -51,7 +52,6 @@ def list_users(
 
 @router.get("/me", response_model=UserOut)
 def get_me(current: User = Depends(get_current_user)):
-    """Текущий пользователь (любая роль с валидным access token)."""
     return current
 
 
@@ -59,7 +59,7 @@ def get_me(current: User = Depends(get_current_user)):
 def get_user(
     user_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role(UserRole.admin)),
+    _: User = Depends(require_min_role(UserRole.admin)),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -71,8 +71,14 @@ def get_user(
 def create_user(
     body: UserCreateAdmin,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role(UserRole.admin)),
+    actor: User = Depends(require_min_role(UserRole.admin)),
 ):
+    if body.role != UserRole.user and role_rank(actor) < role_rank(UserRole.superadmin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only superadmin may assign non-default roles",
+        )
+
     ok, err = validate_password_strength(body.password)
     if not ok:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
@@ -98,11 +104,17 @@ def update_user(
     user_id: uuid.UUID,
     body: UserUpdateAdmin,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role(UserRole.admin)),
+    actor: User = Depends(require_min_role(UserRole.admin)),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if body.role is not None and role_rank(actor) < role_rank(UserRole.superadmin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only superadmin may change role",
+        )
 
     if body.email is not None:
         existing = db.query(User).filter(User.email == body.email.lower(), User.id != user_id).first()
@@ -130,7 +142,7 @@ def update_user(
 def delete_user(
     user_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role(UserRole.admin)),
+    _: User = Depends(require_superadmin()),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:

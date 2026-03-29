@@ -1,6 +1,12 @@
 # Host URLs (defaults below). After editing app code: docker compose up -d --build
 #   Web API: http://localhost:28080  — /docs, /health, /api/v1
 #   Postgres: localhost:45432  |  Redis: localhost:26379
+#
+# OAuth: copy .env.example → .env, set client id/secret. Callback URLs (example for default port):
+#   http://localhost:28080/api/v1/oauth/google/callback
+#   http://localhost:28080/api/v1/oauth/github/callback
+#   http://localhost:28080/api/v1/oauth/yandex/callback
+# If APP_PORT differs, set OAUTH_REDIRECT_BASE_URL to match (e.g. http://localhost:8080).
 services:
   app:
     build: .
@@ -11,6 +17,14 @@ services:
       DATABASE_URL: postgresql://authfortress:authfortress@postgres:5432/authfortress
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-change-me-use-long-random-secret-key-32chars}
+      OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:-http://localhost:28080}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:-}
+      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:-}
+      OAUTH_TOKEN_ENCRYPTION_KEY: ${OAUTH_TOKEN_ENCRYPTION_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

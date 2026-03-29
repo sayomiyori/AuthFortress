@@ -1,5 +1,5 @@
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import jwt
@@ -18,7 +18,7 @@ def _hash_refresh_jti(jti: str) -> str:
 
 def _as_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -53,6 +53,8 @@ def authenticate_user(db: Session, *, email: str, password: str) -> User | None:
     user = db.query(User).filter(User.email == email.lower()).first()
     if not user or not user.is_active:
         return None
+    if user.hashed_password is None:
+        return None
     if not verify_password(password, user.hashed_password):
         return None
     return user
@@ -67,7 +69,7 @@ def create_session_and_tokens(
     device_info: str | None,
     ip: str | None,
 ) -> tuple[str, str, UserSession]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expires_at = now + timedelta(days=settings.refresh_token_expire_days)
     jti = jwt_service.new_refresh_jti()
     token_hash = _hash_refresh_jti(jti)
@@ -128,7 +130,7 @@ def refresh_tokens(
         raise ValueError("Session not found")
     if session.revoked_at is not None:
         raise ValueError("Session revoked")
-    if _as_utc(session.expires_at) < datetime.now(timezone.utc):
+    if _as_utc(session.expires_at) < datetime.now(UTC):
         raise ValueError("Session expired")
 
     expected = _hash_refresh_jti(str(jti))
@@ -172,7 +174,7 @@ def logout_session(
     if not session:
         return False
     if session.revoked_at is None:
-        session.revoked_at = datetime.now(timezone.utc)
+        session.revoked_at = datetime.now(UTC)
         db.commit()
     redis_client.delete(f"session:{session_id}")
     return True

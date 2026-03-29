@@ -1,0 +1,11 @@
+target-version = "py312"
+line-length = 120
+src = ["app", "tests"]
+extend-exclude = ["app/db/migrations"]
+
+[lint]
+select = ["E", "F", "I", "UP"]
+ignore = []
+
+[lint.per-file-ignores]
+"app/db/migrations/*" = ["E501"]

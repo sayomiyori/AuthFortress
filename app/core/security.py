@@ -2,15 +2,14 @@ import uuid
 from collections.abc import Callable
 
 import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from redis import Redis
-from sqlalchemy.orm import Session
-
 from app.config import Settings, get_settings
 from app.core.redis_client import get_redis
 from app.db.session import get_db
 from app.models.user import User, UserRole
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis import Redis
+from sqlalchemy.orm import Session
 
 security_scheme = HTTPBearer(auto_error=False)
 

@@ -25,6 +25,18 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
 
+    google_client_id: str = Field(default="", alias="GOOGLE_CLIENT_ID")
+    google_client_secret: str = Field(default="", alias="GOOGLE_CLIENT_SECRET")
+    github_client_id: str = Field(default="", alias="GITHUB_CLIENT_ID")
+    github_client_secret: str = Field(default="", alias="GITHUB_CLIENT_SECRET")
+    yandex_client_id: str = Field(default="", alias="YANDEX_CLIENT_ID")
+    yandex_client_secret: str = Field(default="", alias="YANDEX_CLIENT_SECRET")
+    oauth_redirect_base_url: str = Field(
+        default="http://localhost:8000",
+        alias="OAUTH_REDIRECT_BASE_URL",
+    )
+    oauth_token_encryption_key: str = Field(default="", alias="OAUTH_TOKEN_ENCRYPTION_KEY")
+
 
 @lru_cache
 def get_settings() -> Settings:

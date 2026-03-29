@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 
@@ -14,7 +14,7 @@ def create_access_token(
     role: str,
     session_id: str,
 ) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     exp = now + timedelta(minutes=settings.access_token_expire_minutes)
     payload = {
         "sub": user_id,
@@ -35,7 +35,7 @@ def create_refresh_token(
     session_id: str,
     refresh_jti: str,
 ) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     exp = now + timedelta(days=settings.refresh_token_expire_days)
     payload = {
         "sub": user_id,
@@ -58,3 +58,26 @@ def decode_token(settings: Settings, token: str) -> dict:
 
 def new_refresh_jti() -> str:
     return str(uuid.uuid4())
+
+
+def create_temp_2fa_token(settings: Settings, *, user_id: str) -> str:
+    now = datetime.now(UTC)
+    exp = now + timedelta(minutes=5)
+    payload = {
+        "sub": user_id,
+        "type": "temp_2fa",
+        "iat": int(now.timestamp()),
+        "exp": exp,
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+def decode_temp_2fa_token(settings: Settings, token: str) -> dict:
+    payload = jwt.decode(
+        token,
+        settings.jwt_secret_key,
+        algorithms=[settings.jwt_algorithm],
+    )
+    if payload.get("type") != "temp_2fa":
+        raise ValueError("Invalid temp token type")
+    return payload

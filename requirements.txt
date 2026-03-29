@@ -12,8 +12,16 @@ PyJWT==2.10.1
 redis==5.2.1
 python-multipart==0.0.20
 email-validator==2.2.0
+authlib==1.4.0
+cryptography==44.0.0
+pyotp==2.9.0
+qrcode[pil]==8.0
+pillow==11.0.0
+prometheus-client==0.21.0
 
 # dev / test
 pytest==8.3.4
 httpx==0.28.1
 fakeredis[lua]==2.26.2
+ruff==0.8.4
+mypy==1.13.0

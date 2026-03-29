@@ -1,5 +1,6 @@
 import time
 import uuid
+from typing import Any, cast
 
 from redis import Redis
 
@@ -20,12 +21,13 @@ def sliding_window_allow(
     pipe = redis_client.pipeline()
     pipe.zremrangebyscore(key, 0, window_start)
     pipe.zcard(key)
-    _, count = pipe.execute()
+    exec_result = cast(list[Any], pipe.execute())
+    _, count = exec_result[0], int(exec_result[1])
 
     if count >= limit:
-        oldest_scores = redis_client.zrange(key, 0, 0, withscores=True)
+        oldest_scores = cast(list[tuple[Any, Any]], redis_client.zrange(key, 0, 0, withscores=True))
         if oldest_scores:
-            oldest = oldest_scores[0][1]
+            oldest = float(oldest_scores[0][1])
             retry_after = max(1, int(window_seconds - (now - oldest)) + 1)
         else:
             retry_after = window_seconds

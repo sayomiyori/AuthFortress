@@ -1,15 +1,14 @@
-from typing import Callable
+from collections.abc import Callable
 
+from app.db.session import SessionLocal
+from app.models.audit import AuditLog
 from fastapi import Request, Response
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.db.session import SessionLocal
-from app.models.audit import AuditLog
 
-
-class AuthAuditMiddleware(BaseHTTPMiddleware):
-    """Log each request under /api/v1/auth to audit_logs."""
+class AuditMiddleware(BaseHTTPMiddleware):
+    """Log each HTTP request under /api/v1/auth to audit_logs (transport-level trail)."""
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
@@ -20,22 +19,16 @@ class AuthAuditMiddleware(BaseHTTPMiddleware):
 
         db: Session = SessionLocal()
         try:
-            user_id = None
-            auth = request.headers.get("authorization")
-            details: dict = {
-                "method": request.method,
-                "path": path,
-                "status_code": response.status_code,
-            }
-            if auth:
-                details["has_authorization"] = True
-
             log = AuditLog(
-                user_id=user_id,
-                action=f"auth:{request.method.lower()}:{path}",
-                ip=request.client.host if request.client else None,
+                user_id=None,
+                action="auth.http",
+                ip_address=request.client.host if request.client else None,
                 user_agent=request.headers.get("user-agent"),
-                details=details,
+                details={
+                    "method": request.method,
+                    "path": path,
+                    "status_code": response.status_code,
+                },
             )
             db.add(log)
             db.commit()
