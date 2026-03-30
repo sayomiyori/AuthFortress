@@ -23,6 +23,9 @@ htmlcov/
 .ruff_cache/
 .tox/
 
+# Local scratch assets (not for VCS)
+qr.png
+
 # IDE / OS
 .idea/
 .vscode/
