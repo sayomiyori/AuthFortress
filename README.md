@@ -1,11 +1,13 @@
 # AuthFortress
 
-[![CI](https://github.com/sayomiyori/AuthFortress/actions/workflows/ci.yml/badge.svg)](https://github.com/sayomiyori/AuthFortress/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Docker](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
-[![Ruff](https://img.shields.io/badge/code%20style-ruff-orange?logo=ruff)](https://docs.astral.sh/ruff/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![CI](https://github.com/sayomiyori/AuthFortress/actions/workflows/ci.yml/badge.svg)](https://github.com/sayomiyori/AuthFortress/actions)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue)](#)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](#)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)](#)
+[![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)](#)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](#)
+[![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?logo=prometheus&logoColor=white)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Production-ready authentication microservice built with **FastAPI**, **PostgreSQL**, and **Redis**.
 Covers the full auth stack: JWT sessions, OAuth2 social login, TOTP 2FA, role-based access control, audit logging, rate limiting, and Prometheus metrics — all in one deployable service.
