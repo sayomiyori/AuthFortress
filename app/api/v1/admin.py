@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -48,6 +48,18 @@ class UserAdminOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_validator("id", mode="before")
+    @classmethod
+    def id_as_str(cls, v: object) -> str:
+        return str(v) if v is not None else ""
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def role_as_str(cls, v: object) -> str:
+        if isinstance(v, UserRole):
+            return v.value
+        return str(v) if v is not None else ""
+
 
 @router.get("/users", response_model=dict)
 def admin_list_users(
@@ -56,9 +68,15 @@ def admin_list_users(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
 ):
-    q = db.query(User).order_by(User.email)
-    total = q.count()
-    items = q.offset((page - 1) * size).limit(size).all()
+    # Do not call .count() on the same Query then .offset()/.limit() — breaks SQL/state on PostgreSQL.
+    total = db.query(func.count(User.id)).scalar() or 0
+    items = (
+        db.query(User)
+        .order_by(User.email)
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
     return {
         "items": [UserAdminOut.model_validate(u) for u in items],
         "total": total,
@@ -212,17 +230,26 @@ def admin_audit(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=200),
 ):
-    q = db.query(AuditLog)
-    if user_id is not None:
-        q = q.filter(AuditLog.user_id == user_id)
-    if action:
-        q = q.filter(AuditLog.action == action)
-    if from_ts is not None:
-        q = q.filter(AuditLog.created_at >= from_ts)
-    if to_ts is not None:
-        q = q.filter(AuditLog.created_at <= to_ts)
-    total = q.count()
-    rows = q.order_by(AuditLog.created_at.desc()).offset((page - 1) * size).limit(size).all()
+    def _audit_filtered():
+        q = db.query(AuditLog)
+        if user_id is not None:
+            q = q.filter(AuditLog.user_id == user_id)
+        if action:
+            q = q.filter(AuditLog.action == action)
+        if from_ts is not None:
+            q = q.filter(AuditLog.created_at >= from_ts)
+        if to_ts is not None:
+            q = q.filter(AuditLog.created_at <= to_ts)
+        return q
+
+    total = _audit_filtered().count()
+    rows = (
+        _audit_filtered()
+        .order_by(AuditLog.created_at.desc())
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
     return {
         "items": [
             {
