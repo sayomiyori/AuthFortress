@@ -3,6 +3,7 @@ import json
 import pytest
 from app.config import Settings
 from app.models.oauth_account import OAuthAccount
+from app.models.session import UserSession
 from app.models.user import User
 from app.services.oauth.account_service import find_or_link_oauth_user
 from app.services.oauth.base import OAuthProvider, OAuthUserProfile
@@ -151,3 +152,37 @@ def test_find_or_link_raises_if_user_already_has_provider(db_session: Session, t
             profile=profile,
             raw_access_token="t",
         )
+
+
+@pytest.mark.parametrize("enabled, active, expected", [(True, True, 200), (False, False, 403)])
+def test_oauth_respects_twofa_and_account_block(client, db_session, monkeypatch, enabled, active, expected):
+    db_session.add(User(email="oauth_new@example.com", username="oauth", totp_enabled=enabled, is_active=active))
+    db_session.commit()
+    _patch_google_factory(monkeypatch)
+    client.get("/api/v1/oauth/google/authorize", follow_redirects=False)
+    state = client.cookies.get("oauth_state")
+    assert state
+    response = client.get("/api/v1/oauth/google/callback", params={"code": "test", "state": state})
+    assert response.status_code == expected
+    assert "access_token" not in response.json()
+    assert db_session.query(UserSession).count() == 0
+    if active:
+        assert response.json()["requires_2fa"]
+        assert response.json()["temp_token"]
+
+
+def test_oauth_state_cannot_be_used_without_browser_cookie(client, redis_client, monkeypatch):
+    _patch_google_factory(monkeypatch)
+    client.get("/api/v1/oauth/google/authorize", follow_redirects=False)
+    state = redis_client.keys("oauth:state:*")[0].replace("oauth:state:", "")
+    client.cookies.clear()
+    response = client.get("/api/v1/oauth/google/callback", params={"code": "test", "state": state})
+    assert response.status_code == 400
+
+
+def test_oauth_callback_rejects_state_replay(client, redis_client, monkeypatch):
+    _patch_google_factory(monkeypatch)
+    client.get("/api/v1/oauth/google/authorize", follow_redirects=False)
+    state = redis_client.keys("oauth:state:*")[0].replace("oauth:state:", "")
+    assert client.get("/api/v1/oauth/google/callback", params={"code": "test", "state": state}).status_code == 200
+    assert client.get("/api/v1/oauth/google/callback", params={"code": "test", "state": state}).status_code == 400

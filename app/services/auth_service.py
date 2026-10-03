@@ -125,7 +125,7 @@ def refresh_tokens(
     if not sid or not jti:
         raise ValueError("Invalid refresh token payload")
 
-    session = db.query(UserSession).filter(UserSession.id == UUID(sid)).first()
+    session = db.query(UserSession).filter(UserSession.id == UUID(sid)).with_for_update().first()
     if not session:
         raise ValueError("Session not found")
     if session.revoked_at is not None:

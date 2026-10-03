@@ -56,7 +56,9 @@ def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
 
     sid = payload.get("sid")
-    if sid and not redis_client.exists(f"session:{sid}"):
+    if not sid:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing session in token")
+    if not redis_client.exists(f"session:{sid}"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has ended")
 
     sub = payload.get("sub")

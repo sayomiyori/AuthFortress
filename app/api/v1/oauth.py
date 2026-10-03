@@ -5,7 +5,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from redis import Redis
 from sqlalchemy.orm import Session
 
@@ -13,7 +13,7 @@ from app.config import Settings, get_settings
 from app.core.metrics import auth_login_total
 from app.core.redis_client import get_redis
 from app.db.session import get_db
-from app.services import auth_service
+from app.services import auth_service, jwt_service
 from app.services.audit_service import write_audit
 from app.services.oauth.account_service import find_or_link_oauth_user
 from app.services.oauth.base import OAuthProvider
@@ -50,6 +50,7 @@ def _safe_next_url(next_url: str | None, base: str) -> str:
 @router.get("/{provider}/authorize")
 async def oauth_authorize(
     provider: str,
+    request: Request,
     oauth: OAuthProvider = Depends(_provider_dep),
     redis_client: Redis = Depends(get_redis),
     response_mode: Literal["json", "redirect"] = Query("json"),
@@ -65,7 +66,12 @@ async def oauth_authorize(
     )
     redis_client.setex(f"{STATE_REDIS_PREFIX}{state}", STATE_TTL_SECONDS, payload)
     url = oauth.create_authorization_url(state)
-    return RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
+    response = RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
+    response.set_cookie(
+        "oauth_state", state, max_age=STATE_TTL_SECONDS, httponly=True,
+        secure=request.url.scheme == "https", samesite="lax", path="/api/v1/oauth",
+    )
+    return response
 
 
 @router.get("/{provider}/callback")
@@ -91,10 +97,12 @@ async def oauth_callback(
     if not oauth.configured():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OAuth not configured")
 
-    raw = cast(str | None, redis_client.get(f"{STATE_REDIS_PREFIX}{state}"))
+    browser_state = request.cookies.get("oauth_state") or ""
+    if not secrets.compare_digest(browser_state, state):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OAuth browser state")
+    raw = cast(str | None, redis_client.getdel(f"{STATE_REDIS_PREFIX}{state}"))
     if not raw:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired state")
-    redis_client.delete(f"{STATE_REDIS_PREFIX}{state}")
 
     try:
         meta = json.loads(str(raw))
@@ -130,6 +138,16 @@ async def oauth_callback(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e)) from e
 
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is inactive")
+    if user.totp_enabled:
+        challenge_response = JSONResponse({
+            "requires_2fa": True,
+            "temp_token": jwt_service.create_temp_2fa_token(settings, redis_client, user_id=str(user.id)),
+        })
+        challenge_response.delete_cookie("oauth_state", path="/api/v1/oauth")
+        return challenge_response
+
     ip = request.client.host if request.client else None
     auth_login_total.labels(method="oauth", status="success").inc()
     write_audit(
@@ -150,6 +168,7 @@ async def oauth_callback(
     )
 
     mode = meta.get("response_mode") or "json"
+    response: Response
     if mode == "redirect":
         target = _safe_next_url(meta.get("next") or None, settings.oauth_redirect_base_url)
         frag = urlencode(
@@ -159,12 +178,16 @@ async def oauth_callback(
                 "token_type": "bearer",
             },
         )
-        return RedirectResponse(url=f"{target}#{frag}", status_code=status.HTTP_302_FOUND)
+        response = RedirectResponse(url=f"{target}#{frag}", status_code=status.HTTP_302_FOUND)
+        response.delete_cookie("oauth_state", path="/api/v1/oauth")
+        return response
 
-    return JSONResponse(
+    response = JSONResponse(
         {
             "access_token": access,
             "refresh_token": refresh,
             "token_type": "bearer",
         },
     )
+    response.delete_cookie("oauth_state", path="/api/v1/oauth")
+    return response

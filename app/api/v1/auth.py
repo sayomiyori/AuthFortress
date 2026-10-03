@@ -1,6 +1,8 @@
+import hashlib
+
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from redis import Redis
 from sqlalchemy.orm import Session
 
@@ -25,15 +27,14 @@ router = APIRouter()
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
     if request.client:
         return request.client.host
     return "unknown"
 
 
 class RegisterBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     email: EmailStr
     password: str = Field(min_length=1)
     username: str = Field(min_length=1, max_length=128)
@@ -200,7 +201,7 @@ def login(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
     if user.totp_enabled:
-        temp = create_temp_2fa_token(settings, user_id=str(user.id))
+        temp = create_temp_2fa_token(settings, redis_client, user_id=str(user.id))
         write_audit(
             db,
             action="login_success",
@@ -256,14 +257,29 @@ def login_2fa(
 
     from uuid import UUID as UUIDType
 
-    user = db.query(User).filter(User.id == UUIDType(str(payload["sub"]))).first()
+    allowed, retry_after = sliding_window_allow(
+        redis_client, key=f"rl:twofa:{payload.get('sub')}", limit=5, window_seconds=60
+    )
+    if not allowed:
+        rate_limit_exceeded_total.labels(route="login_2fa").inc()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many 2FA attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+    challenge_key = f"twofa:challenge:{payload.get('jti')}"
+    if not payload.get("jti") or redis_client.get(challenge_key) != payload.get("sub"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid 2FA session")
+
+    user = db.query(User).filter(User.id == UUIDType(str(payload["sub"]))).with_for_update().first()
     if not user or not user.is_active or not user.totp_enabled:
         auth_login_total.labels(method="2fa", status="failed").inc()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid 2FA session")
 
+    code = body.code.strip()
     secret_plain = decrypt_token(settings, user.totp_secret_encrypted or "")
-    ok_totp = bool(secret_plain) and totp_service.verify_totp(secret_plain, body.code)
-    ok_backup = totp_service.verify_and_consume_backup_code(user, body.code)
+    ok_totp = bool(secret_plain) and totp_service.verify_totp(secret_plain, code)
+    ok_backup = totp_service.verify_and_consume_backup_code(user, code)
     if not ok_totp and not ok_backup:
         db.commit()
         auth_login_total.labels(method="2fa", status="failed").inc()
@@ -277,6 +293,13 @@ def login_2fa(
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid 2FA code")
 
+    if redis_client.getdel(challenge_key) != payload.get("sub"):
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid 2FA session")
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+    if ok_totp and not redis_client.set(f"twofa:used:{user.id}:{code_hash}", "1", nx=True, ex=120):
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="2FA code already used")
     if ok_backup:
         db.commit()
 
@@ -378,6 +401,8 @@ def twofa_setup(
     settings: Settings = Depends(get_settings),
     current: User = Depends(get_current_user),
 ):
+    if current.totp_enabled:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Disable existing 2FA before setup")
     secret = totp_service.generate_totp_secret()
     current.totp_secret_encrypted = encrypt_token(settings, secret)
     current.totp_enabled = False
@@ -407,6 +432,8 @@ def twofa_verify(
     settings: Settings = Depends(get_settings),
     current: User = Depends(get_current_user),
 ):
+    if current.totp_enabled:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="2FA is already enabled")
     secret_plain = decrypt_token(settings, current.totp_secret_encrypted or "")
     if not secret_plain or not totp_service.verify_totp(secret_plain, body.code):
         totp_setup_total.labels(status="failed").inc()

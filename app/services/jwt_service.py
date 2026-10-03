@@ -60,16 +60,19 @@ def new_refresh_jti() -> str:
     return str(uuid.uuid4())
 
 
-def create_temp_2fa_token(settings: Settings, *, user_id: str) -> str:
+def create_temp_2fa_token(settings: Settings, redis_client, *, user_id: str) -> str:
     now = datetime.now(UTC)
     exp = now + timedelta(minutes=5)
     payload = {
         "sub": user_id,
+        "jti": str(uuid.uuid4()),
         "type": "temp_2fa",
         "iat": int(now.timestamp()),
         "exp": exp,
     }
-    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+    token = jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+    redis_client.setex(f"twofa:challenge:{payload['jti']}", 300, user_id)
+    return token
 
 
 def decode_temp_2fa_token(settings: Settings, token: str) -> dict:

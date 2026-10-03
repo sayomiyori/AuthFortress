@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.rbac import require_min_role, require_superadmin, role_rank
@@ -21,6 +21,11 @@ class UserOut(BaseModel):
     is_active: bool
 
     model_config = {"from_attributes": True}
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def id_as_str(cls, value: object) -> str:
+        return str(value)
 
 
 class UserCreateAdmin(BaseModel):
@@ -73,7 +78,7 @@ def create_user(
     db: Session = Depends(get_db),
     actor: User = Depends(require_min_role(UserRole.admin)),
 ):
-    if body.role != UserRole.user and role_rank(actor) < role_rank(UserRole.superadmin):
+    if body.role != UserRole.user and role_rank(actor.role) < role_rank(UserRole.superadmin):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only superadmin may assign non-default roles",
@@ -110,7 +115,9 @@ def update_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    if body.role is not None and role_rank(actor) < role_rank(UserRole.superadmin):
+    if role_rank(actor.role) < role_rank(user.role):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot modify a higher-role user")
+    if body.role is not None and role_rank(actor.role) < role_rank(UserRole.superadmin):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only superadmin may change role",
