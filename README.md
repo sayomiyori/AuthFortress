@@ -253,10 +253,55 @@ GET /metrics
 
 ## Running Tests
 
-```bash
-# Requires running PostgreSQL and Redis (or use docker compose)
-pytest -q
+Use Python 3.12 and the isolated verification stack. It binds only to loopback
+and uses separate databases for HTTP smoke tests, pytest, and migration checks.
+The pytest fixture applies Alembic migrations, rolls back each test transaction,
+and routes HTTP audit writes into the same test database. Redis tests use database 15.
+
+```powershell
+uv venv --python 3.12 .venv
+uv pip install --python .venv/Scripts/python.exe -r requirements.txt
+docker compose -p authfortress-verification -f docker-compose.test.yml config --quiet
+docker compose -p authfortress-verification -f docker-compose.test.yml up -d --build --wait
+$env:TEST_DATABASE_URL = 'postgresql+psycopg2://authfortress_test:local-test-only@localhost:55432/authfortress_pytest_test'
+$env:TEST_REDIS_URL = 'redis://localhost:56379/15'
+.venv/Scripts/python.exe -m pytest -q --tb=no
+.venv/Scripts/python.exe -m ruff check app tests scripts
+.venv/Scripts/python.exe -m mypy app
+.venv/Scripts/python.exe scripts/verify_auth.py
+.venv/Scripts/python.exe -m scripts.verify_refresh_concurrency --database-race
+.venv/Scripts/python.exe -m scripts.verify_refresh_concurrency
 ```
+
+The smoke script creates a unique disposable user and checks login, `/me`, auth
+failures, RBAC, refresh replay, logout and metrics at `http://127.0.0.1:38080`.
+It does not print credentials or tokens. Only point it at disposable local data.
+
+Migration drift can be checked separately:
+
+```powershell
+$env:DATABASE_URL = 'postgresql+psycopg2://authfortress_test:local-test-only@localhost:55432/authfortress_migration_test'
+.venv/Scripts/python.exe -m alembic upgrade head
+.venv/Scripts/python.exe -m alembic check
+```
+
+Downgrades remove schema/data: obtain approval before running them, even on a test database.
+Do not use `down -v` or recreate database storage to clean tests.
+
+### Authentication security contracts
+
+- Access tokens require an active session claim; unknown registration fields are rejected.
+- Enabled TOTP must be disabled with a valid factor before setting up a replacement.
+- Password and OAuth login both return a single-use Redis-backed challenge when TOTP is enabled.
+- 2FA has a per-user attempt limit; a successful TOTP cannot be replayed during its acceptance window.
+- OAuth callbacks require the browser's HttpOnly, SameSite=Lax state cookie; state is consumed atomically.
+- OAuth login rejects inactive accounts. For TOTP accounts, callback returns a JSON challenge even in redirect mode.
+- Admins cannot modify or revoke sessions of users with a higher role.
+- Client IP comes from `request.client`; forwarded headers must be handled by explicitly trusted proxy configuration.
+- Passwords are limited to 72 UTF-8 bytes to prevent bcrypt truncation. Existing bcrypt hashes remain supported.
+
+Real OAuth provider login, concurrent backup-code behavior and dependency
+advisory remediation still require their separate verification gates before a public deployment.
 
 CI runs on every push and pull request via GitHub Actions:
 - Ruff (linting)

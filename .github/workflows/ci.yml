@@ -55,6 +55,8 @@ jobs:
         env:
           DATABASE_URL: postgresql+psycopg2://test:test@localhost:5432/test
           REDIS_URL: redis://localhost:6379/0
+          TEST_DATABASE_URL: postgresql+psycopg2://test:test@localhost:5432/test
+          TEST_REDIS_URL: redis://localhost:6379/15
           JWT_SECRET_KEY: ci-jwt-secret-key-at-least-32-characters-long
         run: pytest -q
 

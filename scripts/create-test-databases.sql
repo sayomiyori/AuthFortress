@@ -1,0 +1,2 @@
+CREATE DATABASE authfortress_pytest_test;
+CREATE DATABASE authfortress_migration_test;

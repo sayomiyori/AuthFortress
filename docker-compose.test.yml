@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: authfortress_test
+      POSTGRES_PASSWORD: local-test-only
+      POSTGRES_DB: authfortress_test
+    volumes:
+      - ./scripts/create-test-databases.sql:/docker-entrypoint-initdb.d/01-test-databases.sql:ro
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authfortress_test -d authfortress_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://authfortress_test:local-test-only@postgres:5432/authfortress_test
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: isolated-local-test-signing-key-32-characters
+    ports:
+      - "127.0.0.1:38080:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
