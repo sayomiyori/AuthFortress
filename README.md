@@ -275,8 +275,9 @@ $env:DATABASE_URL = 'postgresql+psycopg2://authfortress_test:local-test-only@loc
 .venv/Scripts/python.exe -m scripts.verify_refresh_concurrency
 ```
 
-The smoke script creates a unique disposable user and checks login, `/me`, auth
-failures, RBAC, refresh replay, logout and metrics at `http://127.0.0.1:38080`.
+The smoke script creates disposable users and a tenant and checks login, `/me`, auth
+failures, RBAC, refresh replay, logout, metrics, tenant authorization and cross-user
+isolation at `http://127.0.0.1:38080`.
 It does not print credentials or tokens. Only point it at disposable local data.
 
 Migration drift can be checked separately:
@@ -289,6 +290,37 @@ $env:DATABASE_URL = 'postgresql+psycopg2://authfortress_test:local-test-only@loc
 
 Downgrades remove schema/data: obtain approval before running them, even on a test database.
 Do not use `down -v` or recreate database storage to clean tests.
+
+### Tenant foundation
+
+Authenticated users can create and access organizations through:
+
+| Endpoint | Result |
+| --- | --- |
+| `POST /api/v1/tenants` with `{ "name": "Team" }` | 201 tenant with creator as owner |
+| `GET /api/v1/tenants?offset=0&limit=50` | Active memberships, ordered by creation time and UUID |
+| `GET /api/v1/tenants/{tenant_id}` | Active tenant and caller's membership role |
+| `POST /api/v1/tenants/{tenant_id}/authorize` with `{ "permission": "tenant.read" }` | Authorized identity and tenant context |
+
+Names are trimmed and limited to 1–128 characters. Pagination allows offset >= 0
+and limit 1–100. Creation and authorization reject extra body fields.
+Creation writes the tenant, owner membership and audit event in one transaction.
+Timestamps are returned in UTC.
+
+Members can authorize `tenant.read`, `bot.read` and `ai.read`. Owners additionally
+authorize `tenant.manage`, `bot.manage` and `ai.configure`. Global `admin` and
+`superadmin` roles provide no tenant bypass. Missing, invalid, revoked or inactive
+identity returns 401; an inaccessible/inactive tenant or membership returns 404;
+an active member requesting a management permission gets 403.
+
+Deleting a tenant creator through either superadmin user deletion endpoint returns
+409 (`User owns a tenant`), including when the tenant is inactive. Owner transfer
+and tenant deletion must be designed before permitting this deletion.
+
+Alembic revision `004_tenants` adds tenants and unique `(tenant_id, user_id)`
+memberships. This stage provides identity context only: membership invitations,
+tenant mutation, service-to-service authentication and downstream tenant enforcement
+are not implemented. Permission names do not establish working bot or AI endpoints.
 
 ### Authentication security contracts
 

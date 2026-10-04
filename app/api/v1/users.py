@@ -8,6 +8,7 @@ from app.core.rbac import require_min_role, require_superadmin, role_rank
 from app.core.security import get_current_user
 from app.db.session import get_db
 from app.models.user import User, UserRole
+from app.services import tenant_service
 from app.services.password import hash_password, validate_password_strength
 
 router = APIRouter()
@@ -151,9 +152,10 @@ def delete_user(
     db: Session = Depends(get_db),
     _: User = Depends(require_superadmin()),
 ):
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == user_id).with_for_update().first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    tenant_service.ensure_user_has_no_tenants(db, user_id)
     db.delete(user)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

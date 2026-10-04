@@ -37,8 +37,32 @@ def verify(base_url: str) -> None:
         ).status_code == 401
         headers = {"Authorization": f"Bearer {rotated.json()['access_token']}"}
         assert client.get("/api/v1/auth/me", headers=headers).status_code == 200
+        created = client.post("/api/v1/tenants", json={"name": " Smoke tenant "}, headers=headers)
+        assert created.status_code == 201, "tenant creation failed"
+        tenant = created.json()
+        assert tenant["name"] == "Smoke tenant" and tenant["role"] == "owner"
+        tenant_path = f"/api/v1/tenants/{tenant['id']}"
+        assert tenant in client.get("/api/v1/tenants", headers=headers).json()
+        assert client.get(tenant_path, headers=headers).json() == tenant
+        authorized = client.post(tenant_path + "/authorize", json={"permission": "tenant.manage"}, headers=headers)
+        assert authorized.status_code == 200 and authorized.json()["user_id"] == user_id
+        assert client.get(tenant_path).status_code == 401
+        assert client.get(tenant_path, headers={"Authorization": "Bearer malformed"}).status_code == 401
+        other_email = f"smoke-other-{uuid.uuid4().hex}@example.com"
+        assert client.post("/api/v1/auth/register", json={
+            "email": other_email, "password": password, "username": "smoke-other"
+        }).status_code == 200
+        other_login = client.post("/api/v1/auth/login", json={"email": other_email, "password": password})
+        assert other_login.status_code == 200
+        other_headers = {"Authorization": f"Bearer {other_login.json()['access_token']}"}
+        assert client.get("/api/v1/tenants", headers=other_headers).json() == []
+        assert client.get(tenant_path, headers=other_headers).status_code == 404
+        assert client.post(tenant_path + "/authorize", json={"permission": "tenant.read"},
+                           headers=other_headers).status_code == 404
+        assert client.post("/api/v1/auth/logout", headers=other_headers).status_code == 204
         assert client.post("/api/v1/auth/logout", headers=headers).status_code == 204
         assert client.get("/api/v1/auth/me", headers=headers).status_code == 401
+        assert client.get(tenant_path, headers=headers).status_code == 401
         assert client.post(
             "/api/v1/auth/refresh", json={"refresh_token": rotated.json()["refresh_token"]}
         ).status_code == 401
@@ -46,7 +70,7 @@ def verify(base_url: str) -> None:
         assert metrics.status_code == 200 and "auth_login_total" in metrics.text
     print(
         "PASS: health, registration, login, protected endpoint, auth failures, "
-        "RBAC, rotation, replay, logout, metrics"
+        "RBAC, rotation, replay, logout, metrics, tenant creation/authorization/isolation"
     )
 
 

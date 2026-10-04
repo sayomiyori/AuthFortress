@@ -13,7 +13,7 @@ from app.db.session import get_db
 from app.models.audit import AuditLog
 from app.models.session import UserSession
 from app.models.user import User, UserRole
-from app.services import auth_service
+from app.services import auth_service, tenant_service
 from app.services.audit_service import write_audit
 
 router = APIRouter()
@@ -158,9 +158,10 @@ def admin_delete_user(
     db: Session = Depends(get_db),
     actor: User = Depends(require_superadmin()),
 ):
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == user_id).with_for_update().first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    tenant_service.ensure_user_has_no_tenants(db, user_id)
     db.delete(user)
     db.commit()
     write_audit(
