@@ -35,16 +35,7 @@ class GitHubOAuthProvider(OAuthProvider):
         return uri
 
     async def exchange_code(self, authorization_response: str, client: httpx.AsyncClient) -> dict:
-        oauth = AsyncOAuth2Client(
-            self.client_id,
-            self.client_secret,
-            redirect_uri=self.redirect_uri(),
-            client=client,
-        )
-        return await oauth.fetch_token(
-            self._TOKEN,
-            authorization_response=authorization_response,
-        )
+        return await self._exchange_code(self._TOKEN, authorization_response, client)
 
     async def fetch_profile(self, token: dict, client: httpx.AsyncClient) -> OAuthUserProfile:
         access = token.get("access_token")
@@ -61,19 +52,12 @@ class GitHubOAuthProvider(OAuthProvider):
         uid = u.get("id")
         if uid is None:
             raise ValueError("GitHub did not return id")
-        email = u.get("email")
+        er = await client.get(self._API_EMAILS, headers=headers)
+        er.raise_for_status()
+        emails = er.json()
+        email = next((row.get("email") for row in emails if row.get("primary") and row.get("verified")), None)
         if not email:
-            er = await client.get(self._API_EMAILS, headers=headers)
-            er.raise_for_status()
-            for row in er.json():
-                if row.get("primary") and row.get("verified"):
-                    email = row.get("email")
-                    break
-            if not email:
-                for row in er.json():
-                    if row.get("verified") and row.get("email"):
-                        email = row.get("email")
-                        break
+            email = next((row.get("email") for row in emails if row.get("verified") and row.get("email")), None)
         if not email:
             raise ValueError("GitHub did not return a verified email")
         return OAuthUserProfile(

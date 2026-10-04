@@ -98,7 +98,7 @@ async def oauth_callback(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="OAuth not configured")
 
     browser_state = request.cookies.get("oauth_state") or ""
-    if not secrets.compare_digest(browser_state, state):
+    if not browser_state.isascii() or not state.isascii() or not secrets.compare_digest(browser_state, state):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OAuth browser state")
     raw = cast(str | None, redis_client.getdel(f"{STATE_REDIS_PREFIX}{state}"))
     if not raw:
@@ -108,6 +108,13 @@ async def oauth_callback(
         meta = json.loads(str(raw))
     except json.JSONDecodeError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Corrupt OAuth state") from None
+
+    if (
+        not isinstance(meta, dict)
+        or meta.get("response_mode") not in (None, "json", "redirect")
+        or not isinstance(meta.get("next", ""), str)
+    ):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Corrupt OAuth state")
 
     if meta.get("provider") != oauth.name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provider mismatch")

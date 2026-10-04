@@ -34,16 +34,7 @@ class GoogleOAuthProvider(OAuthProvider):
         return uri
 
     async def exchange_code(self, authorization_response: str, client: httpx.AsyncClient) -> dict:
-        oauth = AsyncOAuth2Client(
-            self.client_id,
-            self.client_secret,
-            redirect_uri=self.redirect_uri(),
-            client=client,
-        )
-        return await oauth.fetch_token(
-            self._TOKEN,
-            authorization_response=authorization_response,
-        )
+        return await self._exchange_code(self._TOKEN, authorization_response, client)
 
     async def fetch_profile(self, token: dict, client: httpx.AsyncClient) -> OAuthUserProfile:
         access = token.get("access_token")
@@ -55,8 +46,7 @@ class GoogleOAuthProvider(OAuthProvider):
         )
         r.raise_for_status()
         d = r.json()
-        ev = d.get("email_verified", True)
-        if ev is False or str(ev).lower() in ("false", "0", ""):
+        if d.get("email_verified") is not True:
             raise ValueError("Google email not verified")
         email = d.get("email")
         if not email:

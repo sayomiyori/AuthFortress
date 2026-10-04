@@ -31,3 +31,36 @@ infrastructure while pytest is running: a previous run lost a connection during 
 - Backup-code concurrency across login and disable paths. Login now locks the user row; a concurrent acceptance check remains.
 - Dependency audit reported advisories in six direct pinned packages. Duplicate advisory rows are not unique findings; transitive dependencies were not covered by that command.
 - Public-deployment configuration, default secrets, exposed infrastructure ports and non-root image policy.
+# Pause addendum — 2026-10-03
+
+Verified additional defects and fixes:
+
+- Disable-2FA had unlimited attempts and accepted TOTP already used for login.
+  Added shared per-user limiter, normalized TOTP replay guard and row-lock reload.
+  Regressions: `test_twofa_disable_is_rate_limited`,
+  `test_twofa_disable_rejects_totp_used_for_login`; three real HTTP backup-code races pass.
+- Split Redis limiter read/write admitted two concurrent requests with limit one.
+  Atomic Lua admission fixes `test_concurrent_requests_cannot_exceed_rate_limit`.
+- OAuth exchange ignored the supplied HTTP client; profile/token validation accepted
+  unverified/malformed identities. Real HTTP-boundary adapter/failure tests reproduce
+  and verify fixes in `tests/test_oauth_providers.py` and `tests/test_oauth_http.py`.
+- Missing/weak/default JWT secret was accepted. Configuration now rejects it and
+  hides validation inputs; `tests/test_config.py` passes. Explicit JWT secret required.
+- Non-ASCII state and non-object/corrupt Redis state metadata caused callback 500s.
+  ASCII/type validation now returns 400; six new state cases pass.
+- Direct dependency warnings and transitive Starlette warnings were removed through
+  targeted security version updates; installed-environment audit reports no known vulnerabilities.
+
+Paused before full-suite rerun after final OAuth-state changes. Last complete suite
+122 passed; latest Ruff has one E501 in `tests/test_oauth.py:207`; Mypy passes.
+Current built image predates final OAuth-state fix. See NexusCore pause checkpoint.
+
+## Final resume — 2026-10-04
+
+The pause status above is historical. Final OAuth-state cases are included in
+the complete run: 128 passed, one upstream warning, 220.24s. Ruff passes; Mypy
+passes for 35 files. The latest image includes the state fix and runs as UID10001;
+`.env/.git/.venv` exclusion assertions pass. Real auth, refresh concurrency and
+three 2FA backup-code races pass. Installed-environment pip-audit reports no known
+vulnerabilities. Real provider browser login, tenant modeling and public deployment
+remain unverified. See NexusCore final verification report for commands.

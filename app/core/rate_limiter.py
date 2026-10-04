@@ -1,6 +1,6 @@
 import time
 import uuid
-from typing import Any, cast
+from typing import cast
 
 from redis import Redis
 
@@ -17,25 +17,19 @@ def sliding_window_allow(
     Returns (allowed, retry_after_seconds). retry_after is 0 if allowed.
     """
     now = time.time()
-    window_start = now - window_seconds
-    pipe = redis_client.pipeline()
-    pipe.zremrangebyscore(key, 0, window_start)
-    pipe.zcard(key)
-    exec_result = cast(list[Any], pipe.execute())
-    _, count = exec_result[0], int(exec_result[1])
-
-    if count >= limit:
-        oldest_scores = cast(list[tuple[Any, Any]], redis_client.zrange(key, 0, 0, withscores=True))
-        if oldest_scores:
-            oldest = float(oldest_scores[0][1])
-            retry_after = max(1, int(window_seconds - (now - oldest)) + 1)
-        else:
-            retry_after = window_seconds
-        return False, retry_after
-
-    member = f"{now}:{uuid.uuid4().hex}"
-    pipe = redis_client.pipeline()
-    pipe.zadd(key, {member: now})
-    pipe.expire(key, window_seconds + 5)
-    pipe.execute()
-    return True, 0
+    # Admission and counting must be atomic across concurrent HTTP workers.
+    result = cast(list[int], redis_client.eval(
+        """
+        redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, ARGV[1] - ARGV[2])
+        if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then
+            local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+            local retry = math.max(1, math.floor(ARGV[2] - (ARGV[1] - oldest[2])) + 1)
+            return {0, retry}
+        end
+        redis.call('ZADD', KEYS[1], ARGV[1], ARGV[4])
+        redis.call('EXPIRE', KEYS[1], ARGV[2] + 5)
+        return {1, 0}
+        """,
+        1, key, str(now), str(window_seconds), str(limit), uuid.uuid4().hex,
+    ))
+    return bool(result[0]), int(result[1])

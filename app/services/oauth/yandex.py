@@ -34,16 +34,7 @@ class YandexOAuthProvider(OAuthProvider):
         return uri
 
     async def exchange_code(self, authorization_response: str, client: httpx.AsyncClient) -> dict:
-        oauth = AsyncOAuth2Client(
-            self.client_id,
-            self.client_secret,
-            redirect_uri=self.redirect_uri(),
-            client=client,
-        )
-        return await oauth.fetch_token(
-            self._TOKEN,
-            authorization_response=authorization_response,
-        )
+        return await self._exchange_code(self._TOKEN, authorization_response, client)
 
     async def fetch_profile(self, token: dict, client: httpx.AsyncClient) -> OAuthUserProfile:
         access = token.get("access_token")
@@ -59,7 +50,7 @@ class YandexOAuthProvider(OAuthProvider):
         yid = d.get("id")
         if yid is None:
             raise ValueError("Yandex did not return id")
-        email = d.get("default_email") or d.get("emails", [None])[0]
+        email = d.get("default_email") or next(iter(d.get("emails") or []), None)
         if not email:
             raise ValueError("Yandex did not return email")
         return OAuthUserProfile(

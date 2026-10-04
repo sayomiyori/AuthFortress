@@ -186,3 +186,25 @@ def test_oauth_callback_rejects_state_replay(client, redis_client, monkeypatch):
     state = redis_client.keys("oauth:state:*")[0].replace("oauth:state:", "")
     assert client.get("/api/v1/oauth/google/callback", params={"code": "test", "state": state}).status_code == 200
     assert client.get("/api/v1/oauth/google/callback", params={"code": "test", "state": state}).status_code == 400
+
+
+@pytest.mark.parametrize("metadata", [
+    "null", "[]", '"invalid"',
+    '{"provider":"google","next":[]}', '{"provider":"google","response_mode":[]}',
+])
+def test_oauth_callback_rejects_corrupt_state_metadata(client, redis_client, monkeypatch, metadata):
+    _patch_google_factory(monkeypatch)
+    client.get("/api/v1/oauth/google/authorize", follow_redirects=False)
+    state = client.cookies.get("oauth_state")
+    redis_client.set(f"oauth:state:{state}", metadata)
+    response = client.get("/api/v1/oauth/google/callback", params={"code": "test", "state": state})
+    assert response.status_code == 400
+
+
+def test_oauth_callback_rejects_non_ascii_state(client, monkeypatch):
+    _patch_google_factory(monkeypatch)
+    client.get("/api/v1/oauth/google/authorize", follow_redirects=False)
+    response = client.get(
+        "/api/v1/oauth/google/callback", params={"code": "test", "state": "invalid-\u0441\u0442\u0430\u0442\u0435"}
+    )
+    assert response.status_code == 400

@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +9,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_name: str = "AuthFortress"
@@ -21,6 +22,14 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
     jwt_secret_key: str = Field(default="change-me-in-production-use-long-random", alias="JWT_SECRET_KEY")
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def validate_jwt_secret(cls, value: str) -> str:
+        if len(value.encode()) < 32 or value == "change-me-in-production-use-long-random":
+            raise ValueError("JWT_SECRET_KEY must be explicitly set to a random secret of at least 32 bytes")
+        return value
+
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30

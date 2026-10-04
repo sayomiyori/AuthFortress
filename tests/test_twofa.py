@@ -97,3 +97,34 @@ def test_twofa_disable_requires_valid_code(client, twofa_user):
     ).status_code == 204
     response = client.post("/api/v1/auth/login", json=credentials)
     assert response.status_code == 200 and "access_token" in response.json()
+
+
+def test_twofa_disable_is_rate_limited(client, twofa_user):
+    _, headers, _, _ = twofa_user
+    for _ in range(5):
+        response = client.post("/api/v1/auth/2fa/disable", json={"code": "invalid"}, headers=headers)
+        assert response.status_code == 400
+    response = client.post("/api/v1/auth/2fa/disable", json={"code": "invalid"}, headers=headers)
+    assert response.status_code == 429
+    assert int(response.headers["Retry-After"]) > 0
+
+
+def test_twofa_disable_rejects_totp_used_for_login(client, twofa_user, db_session):
+    credentials, headers, secret, _ = twofa_user
+    code = pyotp.TOTP(secret).now()
+    challenge = client.post("/api/v1/auth/login", json=credentials).json()["temp_token"]
+    assert client.post(
+        "/api/v1/auth/login/2fa", json={"temp_token": challenge, "code": code}
+    ).status_code == 200
+    response = client.post("/api/v1/auth/2fa/disable", json={"code": f" {code} "}, headers=headers)
+    assert response.status_code == 400
+    assert db_session.query(User).filter_by(email="twofa@example.com").one().totp_enabled
+
+
+def test_twofa_disable_rejects_repeated_backup_code(client, twofa_user):
+    _, headers, _, backup_codes = twofa_user
+    for expected in (204, 400):
+        response = client.post(
+            "/api/v1/auth/2fa/disable", json={"code": backup_codes[0]}, headers=headers
+        )
+        assert response.status_code == expected

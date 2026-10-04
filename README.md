@@ -265,10 +265,12 @@ docker compose -p authfortress-verification -f docker-compose.test.yml config --
 docker compose -p authfortress-verification -f docker-compose.test.yml up -d --build --wait
 $env:TEST_DATABASE_URL = 'postgresql+psycopg2://authfortress_test:local-test-only@localhost:55432/authfortress_pytest_test'
 $env:TEST_REDIS_URL = 'redis://localhost:56379/15'
+$env:JWT_SECRET_KEY = 'verification-test-secret-at-least-32-bytes-long'
 .venv/Scripts/python.exe -m pytest -q --tb=no
 .venv/Scripts/python.exe -m ruff check app tests scripts
 .venv/Scripts/python.exe -m mypy app
 .venv/Scripts/python.exe scripts/verify_auth.py
+$env:DATABASE_URL = 'postgresql+psycopg2://authfortress_test:local-test-only@localhost:55432/authfortress_test'
 .venv/Scripts/python.exe -m scripts.verify_refresh_concurrency --database-race
 .venv/Scripts/python.exe -m scripts.verify_refresh_concurrency
 ```

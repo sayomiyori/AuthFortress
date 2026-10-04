@@ -470,13 +470,27 @@ def twofa_disable(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current: User = Depends(get_current_user),
+    redis_client: Redis = Depends(get_redis),
 ):
+    allowed, retry_after = sliding_window_allow(
+        redis_client, key=f"rl:twofa:{current.id}", limit=5, window_seconds=60
+    )
+    if not allowed:
+        rate_limit_exceeded_total.labels(route="twofa_disable").inc()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many 2FA attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+    # Reload under the same row lock as login to serialize backup-code consumption.
+    current = db.query(User).filter(User.id == current.id).populate_existing().with_for_update().one()
     if not current.totp_secret_encrypted:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No 2FA secret to disable")
 
     secret_plain = decrypt_token(settings, current.totp_secret_encrypted or "")
-    ok_totp = bool(secret_plain) and totp_service.verify_totp(secret_plain, body.code)
-    ok_backup = totp_service.verify_and_consume_backup_code(current, body.code)
+    code = body.code.strip()
+    ok_totp = bool(secret_plain) and totp_service.verify_totp(secret_plain, code)
+    ok_backup = totp_service.verify_and_consume_backup_code(current, code)
     if not ok_totp and not ok_backup:
         db.commit()
         write_audit(
@@ -488,6 +502,11 @@ def twofa_disable(
             details={"result": "invalid_code"},
         )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid code")
+
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+    if ok_totp and not redis_client.set(f"twofa:used:{current.id}:{code_hash}", "1", nx=True, ex=120):
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="2FA code already used")
 
     current.totp_secret_encrypted = None
     current.totp_enabled = False
