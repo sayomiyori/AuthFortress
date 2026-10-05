@@ -125,6 +125,43 @@ def test_multiple_tenants_use_stable_pagination(client, owned, db_session):
     assert client.get("/api/v1/tenants?offset=2", headers=headers).json() == []
 
 
+def test_user_can_access_two_fixture_memberships_without_access_to_other_tenants(client, actors, db_session):
+    member, headers, _ = actors[UserRole.user]
+    creator, _, _ = actors[UserRole.admin]
+    tenants = [Tenant(name=f"Fixture tenant {index}", created_by=creator.id) for index in range(3)]
+    db_session.add_all(tenants)
+    db_session.flush()
+    db_session.add_all([
+        TenantMembership(tenant_id=tenant.id, user_id=creator.id, role=TenantRole.owner) for tenant in tenants
+    ])
+    memberships = [TenantMembership(tenant_id=tenant.id, user_id=member.id, role=TenantRole.member)
+                   for tenant in tenants[:2]]
+    db_session.add_all(memberships)
+    db_session.commit()
+
+    response = client.get("/api/v1/tenants", headers=headers)
+    assert response.status_code == 200
+    assert {item["id"] for item in response.json()} == {str(tenant.id) for tenant in tenants[:2]}
+    for tenant in tenants[:2]:
+        path = f"/api/v1/tenants/{tenant.id}"
+        assert client.get(path, headers=headers).json()["role"] == "member"
+        assert client.post(path + "/authorize", json={"permission": "tenant.read"}, headers=headers).status_code == 200
+        assert client.post(
+            path + "/authorize", json={"permission": "tenant.manage"}, headers=headers
+        ).status_code == 403
+    hidden_path = f"/api/v1/tenants/{tenants[2].id}"
+    assert client.get(hidden_path, headers=headers).status_code == 404
+    assert client.post(
+        hidden_path + "/authorize", json={"permission": "tenant.read"}, headers=headers
+    ).status_code == 404
+
+    memberships[0].is_active = False
+    db_session.commit()
+    assert [item["id"] for item in client.get("/api/v1/tenants", headers=headers).json()] == [str(tenants[1].id)]
+    assert client.get(f"/api/v1/tenants/{tenants[0].id}", headers=headers).status_code == 404
+    assert client.get(f"/api/v1/tenants/{tenants[1].id}", headers=headers).status_code == 200
+
+
 @pytest.mark.parametrize("body", [{"permission": "unknown"}, {},
                                    {"permission": "tenant.manage", "user_id": str(uuid4())},
                                    {"permission": "tenant.read", "allowed": True}])
