@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +31,18 @@ class Settings(BaseSettings):
         return value
 
     jwt_algorithm: str = "HS256"
+    authfortress_webhook_service_key: SecretStr | None = Field(default=None, alias="AUTHFORTRESS_WEBHOOK_SERVICE_KEY")
+
+    @field_validator("authfortress_webhook_service_key")
+    @classmethod
+    def validate_service_key(cls, value: SecretStr | None, info: ValidationInfo) -> SecretStr | None:
+        if value is None:
+            return None
+        key = value.get_secret_value()
+        if not key.isascii() or not 32 <= len(key) <= 256 or key == info.data.get("jwt_secret_key"):
+            raise ValueError("AUTHFORTRESS_WEBHOOK_SERVICE_KEY must be independent ASCII secret of 32 to 256 bytes")
+        return value
+
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
 

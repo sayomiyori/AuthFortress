@@ -319,8 +319,22 @@ and tenant deletion must be designed before permitting this deletion.
 
 Alembic revision `004_tenants` adds tenants and unique `(tenant_id, user_id)`
 memberships. This stage provides identity context only: membership invitations,
-tenant mutation, service-to-service authentication and downstream tenant enforcement
+tenant mutation and downstream tenant enforcement
 are not implemented. Permission names do not establish working bot or AI endpoints.
+
+### Internal tenant status
+
+`GET /internal/v1/tenants/{tenant_id}/status` uses `X-Service-Key`, independently
+configured with `AUTHFORTRESS_WEBHOOK_SERVICE_KEY` (random ASCII, 32 to 256 bytes,
+different from `JWT_SECRET_KEY`). Leave the optional variable unset to disable
+this endpoint: it returns 503 (`Service unavailable`). Invalid or missing keys
+return 401 (`Invalid service key`); user JWTs cannot substitute for this key.
+
+Active tenants return only `{ "tenant_id": "UUID", "is_active": true }`.
+Missing or inactive tenants return 404 (`Tenant not found`). Every request reads
+the database; no positive status cache is used. This key grants no access to user
+APIs. Restrict `/internal/` at the public ingress and use private transport/TLS
+between services. Bot registration and downstream enforcement remain separate work.
 
 ### Authentication security contracts
 

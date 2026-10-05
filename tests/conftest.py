@@ -72,6 +72,7 @@ def test_settings(monkeypatch) -> Settings:
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
     for key in (
+        "AUTHFORTRESS_WEBHOOK_SERVICE_KEY",
         "GOOGLE_CLIENT_ID",
         "GOOGLE_CLIENT_SECRET",
         "GITHUB_CLIENT_ID",

@@ -9,6 +9,13 @@ from app.models.tenant import Tenant, TenantMembership, TenantRole
 from app.models.user import User
 
 
+def get_active_tenant_id(db: Session, tenant_id: UUID) -> UUID:
+    active_id = db.scalar(select(Tenant.id).where(Tenant.id == tenant_id, Tenant.is_active.is_(True)))
+    if active_id is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return active_id
+
+
 def ensure_user_has_no_tenants(db: Session, user_id: UUID) -> None:
     if db.scalar(select(Tenant.id).where(Tenant.created_by == user_id).limit(1)) is not None:
         raise HTTPException(status_code=409, detail="User owns a tenant")

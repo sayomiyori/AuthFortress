@@ -2,6 +2,7 @@ from fastapi import Depends, FastAPI, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.api.internal import router as internal_router
 from app.api.v1 import api_router
 from app.config import get_settings
 from app.core.metrics import active_sessions_gauge, metrics_response_body
@@ -14,6 +15,7 @@ settings = get_settings()
 app = FastAPI(title=settings.app_name, debug=settings.debug)
 app.add_middleware(AuditMiddleware)
 app.include_router(api_router)
+app.include_router(internal_router)
 
 
 @app.get("/")
