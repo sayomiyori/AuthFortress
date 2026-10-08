@@ -4,6 +4,7 @@ from app.db.session import SessionLocal
 from app.models.audit import AuditLog
 from fastapi import Request, Response
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 
 
@@ -16,7 +17,11 @@ class AuditMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         response = await call_next(request)
+        await run_in_threadpool(self._write_audit, request, response.status_code)
+        return response
 
+    @staticmethod
+    def _write_audit(request: Request, status_code: int) -> None:
         db: Session = SessionLocal()
         try:
             log = AuditLog(
@@ -26,8 +31,8 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 user_agent=request.headers.get("user-agent"),
                 details={
                     "method": request.method,
-                    "path": path,
-                    "status_code": response.status_code,
+                    "path": request.url.path,
+                    "status_code": status_code,
                 },
             )
             db.add(log)
@@ -36,5 +41,3 @@ class AuditMiddleware(BaseHTTPMiddleware):
             db.rollback()
         finally:
             db.close()
-
-        return response

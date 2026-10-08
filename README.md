@@ -9,7 +9,9 @@
 [![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?logo=prometheus&logoColor=white)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Production-ready authentication microservice built with **FastAPI**, **PostgreSQL**, and **Redis**.
+Authentication microservice built with **FastAPI**, **PostgreSQL**, and **Redis**.
+Local verification does not establish public deployment readiness; review secrets,
+HTTPS, provider callbacks, backups and deployment configuration for each host.
 Covers the full auth stack: JWT sessions, OAuth2 social login, TOTP 2FA, role-based access control, audit logging, rate limiting, and Prometheus metrics — all in one deployable service.
 
 ---
@@ -38,7 +40,7 @@ Covers the full auth stack: JWT sessions, OAuth2 social login, TOTP 2FA, role-ba
 git clone https://github.com/sayomiyori/AuthFortress.git
 cd AuthFortress
 
-# 2. Configure (optional — OAuth keys, custom ports)
+# 2. Configure (required: database/Redis and a strong unique JWT secret)
 cp .env.example .env
 
 # 3. Start
@@ -348,8 +350,11 @@ between services. Bot registration and downstream enforcement remain separate wo
 - Client IP comes from `request.client`; forwarded headers must be handled by explicitly trusted proxy configuration.
 - Passwords are limited to 72 UTF-8 bytes to prevent bcrypt truncation. Existing bcrypt hashes remain supported.
 
-Real OAuth provider login, concurrent backup-code behavior and dependency
-advisory remediation still require their separate verification gates before a public deployment.
+Local verification on 2026-10-09 passed 192 tests, real PostgreSQL/Redis refresh
+and backup-code races, Ruff, Mypy, and dependency audit. Concurrent duplicate
+registration returns a conflict; audit writes run in a threadpool to keep the
+event loop responsive. See `docs/ERRORS.md` for regressions.
+Real OAuth provider login and public deployment still require separate gates.
 
 CI runs on every push and pull request via GitHub Actions:
 - Ruff (linting)

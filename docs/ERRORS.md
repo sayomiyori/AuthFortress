@@ -1,5 +1,19 @@
 # Verified Defects and Regression Checks
 
+## 2026-10-09: Registration race and audit responsiveness
+
+- Concurrent registration passed the email pre-check twice, then returned 500
+  on the unique constraint. Roll back and translate only a confirmed duplicate
+  email to the existing conflict response; unrelated integrity errors still fail.
+- Synchronous audit commits ran on the async event loop. Run the whole audit
+  session lifecycle in a threadpool. A real 300 ms PostgreSQL lock delayed a
+  20 ms callback by 302.6 ms before and 26.8 ms after the fix.
+- `tests/test_concurrency_regressions.py`: two real PostgreSQL regressions pass;
+  complete suite 192 passed, Ruff/Mypy and Alembic schema check pass.
+- Current installed-environment pip-audit found no known advisories; real
+  backup-code login/login, login/disable and disable/disable races passed.
+  Older open-work lists below describe their dated checkpoints.
+
 ## 2026-10-03: Authentication verification
 
 | Symptom | Root cause | Fix | Regression evidence |
