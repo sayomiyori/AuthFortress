@@ -3,7 +3,19 @@ from app.config import Settings
 from pydantic import ValidationError
 
 
-@pytest.mark.parametrize("secret", ["", "short", "change-me-in-production-use-long-random"])
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "",
+        "short",
+        "change-me-in-production-use-long-random",
+        "replace_with_random_secret_at_least_32_characters",
+        "dev-change-me-use-long-random-secret-key-32chars",
+        "your-secret-key-at-least-32-characters",
+        "a" * 32,
+        "change-me-in-production-use-long-random ",
+    ],
+)
 def test_known_or_weak_jwt_secret_is_rejected(secret, monkeypatch):
     monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
     with pytest.raises(ValidationError, match="JWT_SECRET_KEY"):

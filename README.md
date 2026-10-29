@@ -66,7 +66,7 @@ pip install -r requirements.txt
 # Set environment variables
 export DATABASE_URL=postgresql+psycopg2://user:pass@localhost:5432/authfortress
 export REDIS_URL=redis://localhost:6379/0
-export JWT_SECRET_KEY=your-secret-key-at-least-32-characters
+export JWT_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 
 # Apply migrations
 alembic upgrade head
@@ -244,7 +244,7 @@ GET /metrics
 |----------|---------|-------------|
 | `DATABASE_URL` | — | PostgreSQL connection string |
 | `REDIS_URL` | — | Redis connection string |
-| `JWT_SECRET_KEY` | — | Secret for signing JWTs (32+ chars) |
+| `JWT_SECRET_KEY` | - | Secret for signing JWTs (32+ bytes, 8+ distinct characters) |
 | `OAUTH_REDIRECT_BASE_URL` | `http://localhost:28080` | Base URL for OAuth callbacks |
 | `OAUTH_TOKEN_ENCRYPTION_KEY` | derived from JWT key | Fernet key for encrypting OAuth tokens |
 | `APP_PORT` | `28080` | Host port for the app container |

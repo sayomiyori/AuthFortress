@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import jwt
+from redis.exceptions import RedisError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -57,7 +58,12 @@ def register_user(
 
 
 def authenticate_user(db: Session, *, email: str, password: str) -> User | None:
-    user = db.query(User).filter(User.email == email.lower()).first()
+    user = (
+        db.query(User)
+        .filter(User.email == email.lower())
+        .with_for_update()
+        .first()
+    )
     if not user or not user.is_active:
         return None
     if user.hashed_password is None:
@@ -140,6 +146,9 @@ def refresh_tokens(
     if _as_utc(session.expires_at) < datetime.now(UTC):
         raise ValueError("Session expired")
 
+    if payload.get("sub") != str(session.user_id):
+        raise ValueError("Refresh token subject mismatch")
+
     expected = _hash_refresh_jti(str(jti))
     if session.refresh_token_hash != expected:
         raise ValueError("Refresh token mismatch")
@@ -169,6 +178,42 @@ def refresh_tokens(
         refresh_jti=new_jti,
     )
     return access, new_refresh
+
+
+def revoke_session_rows(
+    sessions,
+    redis_client,
+    *,
+    except_session_id: str | None = None,
+) -> int:
+    now = datetime.now(UTC)
+    revoked = 0
+    for session in sessions:
+        if except_session_id and str(session.id) == str(except_session_id):
+            continue
+        if session.revoked_at is None:
+            session.revoked_at = now
+            revoked += 1
+        try:
+            redis_client.delete(f"session:{session.id}")
+        except RedisError:
+            pass
+    return revoked
+
+
+def revoke_user_sessions(
+    db: Session,
+    redis_client,
+    *,
+    user_id: UUID,
+    except_session_id: str | None = None,
+) -> int:
+    sessions = db.query(UserSession).filter(UserSession.user_id == user_id).all()
+    revoked = revoke_session_rows(
+        sessions, redis_client, except_session_id=except_session_id
+    )
+    db.commit()
+    return revoked
 
 
 def logout_session(

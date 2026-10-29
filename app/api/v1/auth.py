@@ -349,9 +349,11 @@ def refresh(
         uid = None
         if payload and payload.get("sub"):
             try:
-                uid = UUID(str(payload["sub"]))
+                candidate = UUID(str(payload["sub"]))
             except ValueError:
-                uid = None
+                candidate = None
+            if candidate is not None and db.query(User).filter(User.id == candidate).first():
+                uid = candidate
         write_audit(
             db,
             action="token_refresh",

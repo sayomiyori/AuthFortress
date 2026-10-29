@@ -28,3 +28,12 @@ def require_min_role(minimum: UserRole) -> Callable[..., User]:
 
 def require_superadmin() -> Callable[..., User]:
     return require_min_role(UserRole.superadmin)
+
+
+def can_manage_user(actor: User, target: User) -> bool:
+    """Admins manage lower roles and themselves; only superadmins manage peers."""
+    if actor.id == target.id:
+        return True
+    if actor.role == UserRole.superadmin:
+        return True
+    return role_rank(actor.role) > role_rank(target.role)

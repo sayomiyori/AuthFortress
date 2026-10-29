@@ -1,5 +1,6 @@
 import jwt
 import pytest
+from app.models.audit import AuditLog
 from app.models.user import User, UserRole
 from app.services.auth_service import create_session_and_tokens
 
@@ -40,6 +41,39 @@ def test_admin_cannot_block_superadmin(client, actors):
     _, headers = actors[UserRole.admin]
     response = client.patch(f"/api/v1/admin/users/{target.id}/block", json={"blocked": True}, headers=headers)
     assert response.status_code == 403
+
+
+def test_admin_cannot_mutate_peer_admin(client, actors, db_session):
+    peer = User(email="peer-admin@example.com", username="peer", role=UserRole.admin)
+    db_session.add(peer)
+    db_session.commit()
+    _, headers = actors[UserRole.admin]
+    response = client.patch(f"/api/v1/users/{peer.id}", json={"password": "Takeover1pass"}, headers=headers)
+    assert response.status_code == 403
+    response = client.patch(f"/api/v1/admin/users/{peer.id}/block", json={"blocked": True}, headers=headers)
+    assert response.status_code == 403
+
+
+def test_password_reset_revokes_target_sessions_and_audits(
+    client, actors, db_session, test_settings, redis_client
+):
+    target, _ = actors[UserRole.user]
+    access, refresh, _ = create_session_and_tokens(
+        db_session, test_settings, redis_client, user=target, device_info=None, ip=None
+    )
+    _, headers = actors[UserRole.admin]
+    response = client.patch(
+        f"/api/v1/users/{target.id}", json={"password": "Reset1pass"}, headers=headers
+    )
+    assert response.status_code == 200
+    assert (
+        client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {access}"}).status_code
+        == 401
+    )
+    assert client.post("/api/v1/auth/refresh", json={"refresh_token": refresh}).status_code == 401
+    audit = db_session.query(AuditLog).filter_by(action="user_updated").one()
+    assert audit.details["target_user_id"] == str(target.id)
+    assert audit.details["sessions_revoked"] >= 1
 
 
 @pytest.mark.parametrize("actor_role, expected", [(UserRole.admin, 403), (UserRole.superadmin, 200)])

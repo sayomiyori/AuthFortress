@@ -83,7 +83,7 @@ def test_oauth_callback_creates_user_and_tokens(client, redis_client, db_session
     assert acc.access_token_encrypted
 
 
-def test_oauth_callback_links_existing_password_user(
+def test_oauth_callback_rejects_auto_link_for_existing_password_user(
     client, redis_client, db_session: Session, monkeypatch, test_settings
 ):
     client.post(
@@ -105,17 +105,17 @@ def test_oauth_callback_links_existing_password_user(
     keys = [k for k in redis_client.keys() if str(k).startswith("oauth:state:")]
     state = keys[0].replace("oauth:state:", "")
     r = client.get(f"/api/v1/oauth/google/callback?code=c2&state={state}")
-    assert r.status_code == 200
+    assert r.status_code == 409
 
     users = db_session.query(User).filter(User.email == "same@example.com").all()
     assert len(users) == 1
     assert users[0].hashed_password is not None
-    acc = (
+    assert (
         db_session.query(OAuthAccount)
         .filter(OAuthAccount.user_id == users[0].id, OAuthAccount.provider == "google")
-        .one()
+        .count()
+        == 0
     )
-    assert acc.provider_user_id == "google-sub-99"
 
 
 def test_find_or_link_raises_if_user_already_has_provider(db_session: Session, test_settings: Settings):
@@ -156,7 +156,18 @@ def test_find_or_link_raises_if_user_already_has_provider(db_session: Session, t
 
 @pytest.mark.parametrize("enabled, active, expected", [(True, True, 200), (False, False, 403)])
 def test_oauth_respects_twofa_and_account_block(client, db_session, monkeypatch, enabled, active, expected):
-    db_session.add(User(email="oauth_new@example.com", username="oauth", totp_enabled=enabled, is_active=active))
+    user = User(email="oauth_new@example.com", username="oauth", totp_enabled=enabled, is_active=active)
+    db_session.add(user)
+    db_session.flush()
+    db_session.add(
+        OAuthAccount(
+            user_id=user.id,
+            provider="google",
+            provider_user_id="google-sub-1",
+            email="oauth_new@example.com",
+            access_token_encrypted="x",
+        )
+    )
     db_session.commit()
     _patch_google_factory(monkeypatch)
     client.get("/api/v1/oauth/google/authorize", follow_redirects=False)

@@ -3,6 +3,15 @@ from functools import lru_cache
 from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+WEAK_JWT_SECRETS = frozenset(
+    {
+        "change-me-in-production-use-long-random",
+        "replace_with_random_secret_at_least_32_characters",
+        "dev-change-me-use-long-random-secret-key-32chars",
+        "your-secret-key-at-least-32-characters",
+    }
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -26,7 +35,13 @@ class Settings(BaseSettings):
     @field_validator("jwt_secret_key")
     @classmethod
     def validate_jwt_secret(cls, value: str) -> str:
-        if len(value.encode()) < 32 or value == "change-me-in-production-use-long-random":
+        normalized = value.strip()
+        if (
+            normalized != value
+            or len(normalized.encode()) < 32
+            or normalized in WEAK_JWT_SECRETS
+            or len(set(normalized)) < 8
+        ):
             raise ValueError("JWT_SECRET_KEY must be explicitly set to a random secret of at least 32 bytes")
         return value
 

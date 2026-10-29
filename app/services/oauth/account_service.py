@@ -48,17 +48,11 @@ def find_or_link_oauth_user(
     if user:
         if db.query(OAuthAccount).filter(OAuthAccount.user_id == user.id, OAuthAccount.provider == prov).first():
             raise ValueError("This account is already linked to another OAuth identity")
-        row = OAuthAccount(
-            user_id=user.id,
-            provider=prov,
-            provider_user_id=profile.provider_user_id,
-            email=profile.email,
-            access_token_encrypted=at_enc,
-        )
-        db.add(row)
-        db.commit()
-        db.refresh(user)
-        return user, "oauth_link"
+        # Never auto-link an OAuth identity to a local account by email alone:
+        # the local email was never verified and may belong to a pre-registered
+        # attacker account. Explicit linking from an authenticated session is
+        # required (not implemented in this increment).
+        raise ValueError("Email already registered; sign in to link an OAuth identity explicitly")
 
     user = User(
         email=profile.email,

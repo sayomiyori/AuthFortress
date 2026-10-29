@@ -2,13 +2,16 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field, field_validator
+from redis import Redis
 from sqlalchemy.orm import Session
 
-from app.core.rbac import require_min_role, require_superadmin, role_rank
-from app.core.security import get_current_user
+from app.core.rbac import can_manage_user, require_min_role, require_superadmin, role_rank
+from app.core.redis_client import get_redis
+from app.core.security import get_current_session_id, get_current_user
 from app.db.session import get_db
 from app.models.user import User, UserRole
-from app.services import tenant_service
+from app.services import auth_service, tenant_service
+from app.services.audit_service import write_audit
 from app.services.password import hash_password, validate_password_strength
 
 router = APIRouter()
@@ -102,6 +105,12 @@ def create_user(
     db.add(user)
     db.commit()
     db.refresh(user)
+    write_audit(
+        db,
+        action="user_created",
+        user_id=actor.id,
+        details={"target_user_id": str(user.id), "role": user.role.value},
+    )
     return user
 
 
@@ -111,19 +120,31 @@ def update_user(
     body: UserUpdateAdmin,
     db: Session = Depends(get_db),
     actor: User = Depends(require_min_role(UserRole.admin)),
+    redis_client: Redis = Depends(get_redis),
+    current_session_id: str = Depends(get_current_session_id),
 ):
-    user = db.query(User).filter(User.id == user_id).first()
+    user = (
+        db.query(User)
+        .filter(User.id == user_id)
+        .with_for_update()
+        .first()
+    )
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    if role_rank(actor.role) < role_rank(user.role):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot modify a higher-role user")
+    if not can_manage_user(actor, user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot modify this user")
     if body.role is not None and role_rank(actor.role) < role_rank(UserRole.superadmin):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only superadmin may change role",
         )
 
+    email_changed = body.email is not None and body.email.lower() != user.email
+    password_changed = body.password is not None
+    username_changed = body.username is not None and body.username != user.username
+    role_changed = body.role is not None and body.role != user.role
+    active_changed = body.is_active is not None and body.is_active != user.is_active
     if body.email is not None:
         existing = db.query(User).filter(User.email == body.email.lower(), User.id != user_id).first()
         if existing:
@@ -141,8 +162,44 @@ def update_user(
     if body.is_active is not None:
         user.is_active = body.is_active
 
-    db.commit()
+    changed = any(
+        (
+            email_changed,
+            password_changed,
+            username_changed,
+            role_changed,
+            active_changed,
+        )
+    )
+    if not changed:
+        return user
+
+    revoked = 0
+    if email_changed or password_changed:
+        # The helper commits the credential change and the revocations together.
+        revoked = auth_service.revoke_user_sessions(
+            db,
+            redis_client,
+            user_id=user.id,
+            except_session_id=current_session_id if actor.id == user.id else None,
+        )
+    else:
+        db.commit()
     db.refresh(user)
+    write_audit(
+        db,
+        action="user_updated",
+        user_id=actor.id,
+        details={
+            "target_user_id": str(user_id),
+            "password_changed": password_changed,
+            "email_changed": email_changed,
+            "username_changed": username_changed,
+            "role_changed": role_changed,
+            "active_changed": active_changed,
+            "sessions_revoked": revoked,
+        },
+    )
     return user
 
 
@@ -150,7 +207,7 @@ def update_user(
 def delete_user(
     user_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_superadmin()),
+    actor: User = Depends(require_superadmin()),
 ):
     user = db.query(User).filter(User.id == user_id).with_for_update().first()
     if not user:
@@ -158,4 +215,10 @@ def delete_user(
     tenant_service.ensure_user_has_no_tenants(db, user_id)
     db.delete(user)
     db.commit()
+    write_audit(
+        db,
+        action="user_deleted",
+        user_id=None if actor.id == user_id else actor.id,
+        details={"target_user_id": str(user_id)},
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

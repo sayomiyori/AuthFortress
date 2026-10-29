@@ -1,3 +1,52 @@
+import uuid
+
+import jwt
+
+
+def test_refresh_token_subject_mismatch_is_rejected(client, test_settings):
+    credentials = {
+        "email": "refresh@example.com",
+        "password": "Secure1pass",
+        "username": "refresh",
+    }
+    assert client.post("/api/v1/auth/register", json=credentials).status_code == 200
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"email": credentials["email"], "password": credentials["password"]},
+    )
+    assert login.status_code == 200
+    refresh = login.json()["refresh_token"]
+    payload = jwt.decode(refresh, test_settings.jwt_secret_key, algorithms=["HS256"])
+    payload["sub"] = str(uuid.uuid4())
+    forged = jwt.encode(payload, test_settings.jwt_secret_key, algorithm="HS256")
+    assert (
+        client.post("/api/v1/auth/refresh", json={"refresh_token": forged}).status_code == 401
+    )
+    assert (
+        client.post("/api/v1/auth/refresh", json={"refresh_token": refresh}).status_code == 200
+    )
+
+
+def test_refresh_token_without_subject_is_rejected(client, test_settings):
+    credentials = {
+        "email": "refresh-nosub@example.com",
+        "password": "Secure1pass",
+        "username": "refresh-nosub",
+    }
+    assert client.post("/api/v1/auth/register", json=credentials).status_code == 200
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"email": credentials["email"], "password": credentials["password"]},
+    )
+    refresh = login.json()["refresh_token"]
+    payload = jwt.decode(refresh, test_settings.jwt_secret_key, algorithms=["HS256"])
+    del payload["sub"]
+    forged = jwt.encode(payload, test_settings.jwt_secret_key, algorithm="HS256")
+    assert (
+        client.post("/api/v1/auth/refresh", json={"refresh_token": forged}).status_code == 401
+    )
+
+
 def test_register_login_me_refresh_old_refresh_fails_logout_me_fails(client):
     r = client.post(
         "/api/v1/auth/register",

@@ -59,6 +59,18 @@ def test_real_adapter_callback_registers_links_and_reuses_identity(
         return httpx.Response(200, json=_profile_response(name, request.url.path))
 
     oauth_http(handle)
+    if existing_user:
+        state = _state(client, name)
+        response = client.get(
+            f"/api/v1/oauth/{name}/callback",
+            params={"code": "boundary-code", "state": state},
+        )
+        assert response.status_code == 409
+        assert "access_token" not in response.json()
+        assert db_session.query(User).count() == 1
+        assert db_session.query(OAuthAccount).count() == 0
+        assert db_session.query(UserSession).count() == 0
+        return
     for _ in range(2):
         state = _state(client, name)
         response = client.get(f"/api/v1/oauth/{name}/callback", params={"code": "boundary-code", "state": state})

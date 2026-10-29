@@ -1,10 +1,12 @@
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import jwt
 from app.config import Settings, get_settings
 from app.core.redis_client import get_redis
 from app.db.session import get_db
+from app.models.session import UserSession
 from app.models.user import User, UserRole
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -58,6 +60,18 @@ def get_current_user(
     sid = payload.get("sid")
     if not sid:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing session in token")
+    try:
+        session_id = uuid.UUID(str(sid))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session id") from e
+    session = db.query(UserSession).filter(UserSession.id == session_id).first()
+    if session is None or session.revoked_at is not None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has ended")
+    expires_at = session.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < datetime.now(UTC):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has ended")
     if not redis_client.exists(f"session:{sid}"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has ended")
 
@@ -69,6 +83,9 @@ def get_current_user(
         user_id = uuid.UUID(str(sub))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user id") from e
+
+    if session.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session subject")
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user or not user.is_active:
@@ -116,6 +133,8 @@ def get_current_session_id(
     sid = payload.get("sid")
     if not sid:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing session in token")
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
     return str(sid)
 
 

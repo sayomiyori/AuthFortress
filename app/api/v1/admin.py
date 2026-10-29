@@ -7,7 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.core.rbac import require_min_role, require_superadmin, role_rank
+from app.core.rbac import can_manage_user, require_min_role, require_superadmin
 from app.core.redis_client import get_redis
 from app.db.session import get_db
 from app.models.audit import AuditLog
@@ -111,8 +111,8 @@ def admin_block_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    if role_rank(actor.role) < role_rank(user.role):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot modify a higher-role user")
+    if not can_manage_user(actor, user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot modify this user")
     user.is_active = not body.blocked
     db.commit()
     db.refresh(user)
@@ -167,7 +167,7 @@ def admin_delete_user(
     write_audit(
         db,
         action="user_deleted",
-        user_id=actor.id,
+        user_id=None if actor.id == user_id else actor.id,
         details={"target_user_id": str(user_id)},
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -216,8 +216,8 @@ def admin_revoke_session(
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     target = db.query(User).filter(User.id == session.user_id).first()
-    if target and role_rank(actor.role) < role_rank(target.role):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot revoke a higher-role session")
+    if target and not can_manage_user(actor, target):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot revoke this session")
     auth_service.logout_session(db, redis_client, session_id=str(session_id))
     write_audit(
         db,
