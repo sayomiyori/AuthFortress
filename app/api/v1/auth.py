@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
@@ -30,6 +31,15 @@ def _client_ip(request: Request) -> str:
     if request.client:
         return request.client.host
     return "unknown"
+
+
+def _login_subject_key(email: str, secret: str) -> str:
+    """Keyed hash so Redis keys neither contain nor trivially reveal emails."""
+    return hmac.new(
+        secret.encode(),
+        email.strip().lower().encode(),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 class RegisterBody(BaseModel):
@@ -163,31 +173,54 @@ def register(
 def login(
     request: Request,
     body: LoginBody,
-    response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     redis_client: Redis = Depends(get_redis),
     user_agent: str | None = Header(default=None, alias="User-Agent"),
 ):
     ip = _client_ip(request)
-    key = f"rl:login:{ip}"
-    allowed, retry_after = sliding_window_allow(redis_client, key=key, limit=5, window_seconds=60)
-    if not allowed:
-        rate_limit_exceeded_total.labels(route="login").inc()
+    account_allowed, account_retry = sliding_window_allow(
+        redis_client,
+        key=f"rl:login:account:{_login_subject_key(body.email, settings.jwt_secret_key)}",
+        limit=5,
+        window_seconds=60,
+    )
+    if not account_allowed:
+        rate_limit_exceeded_total.labels(route="login_account").inc()
         write_audit(
             db,
             action="rate_limit_exceeded",
             ip_address=ip,
             user_agent=user_agent,
-            details={"route": "login"},
+            details={"route": "login_account"},
         )
-        response.headers["Retry-After"] = str(retry_after)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts",
+            headers={"Retry-After": str(account_retry)},
+        )
+    # Coarse volume ceiling. It is intentionally far above normal traffic; a
+    # sustained 300/min burst can still trip it, but the per-account control above
+    # is what prevents one user's five failures from locking every other account.
+    allowed, retry_after = sliding_window_allow(
+        redis_client, key=f"rl:login:ip:{ip}", limit=300, window_seconds=60
+    )
+    if not allowed:
+        rate_limit_exceeded_total.labels(route="login_ip").inc()
+        write_audit(
+            db,
+            action="rate_limit_exceeded",
+            ip_address=ip,
+            user_agent=user_agent,
+            details={"route": "login_ip"},
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts",
             headers={"Retry-After": str(retry_after)},
         )
-
+    # The root dashboard is a single shared egress; per-account limiting above is
+    # the primary control that prevents a global lockout.
     user = auth_service.authenticate_user(db, email=body.email, password=body.password)
     if not user:
         auth_login_total.labels(method="password", status="failed").inc()

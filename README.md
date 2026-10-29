@@ -26,7 +26,7 @@ Covers the full auth stack: JWT sessions, OAuth2 social login, TOTP 2FA, role-ba
 | **2FA** | TOTP (Google Authenticator) — setup, verify, backup codes |
 | **RBAC** | `user` / `admin` / `superadmin` hierarchy |
 | **Audit log** | 15+ auth events with IP, user-agent, JSON details |
-| **Rate limiting** | 5 login/min · 3 register/min (sliding window, Redis) |
+| **Rate limiting** | 5 login/min per account + coarse 300/min per source · 3 register/min (sliding window, Redis) |
 | **Admin API** | Manage users, sessions, audit log |
 | **Metrics** | Prometheus endpoint at `GET /metrics` |
 | **CI/CD** | GitHub Actions — Ruff · Mypy · Pytest · Docker build |
@@ -72,7 +72,7 @@ export JWT_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(
 alembic upgrade head
 
 # Run
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --no-proxy-headers
 ```
 
 ---
