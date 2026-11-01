@@ -231,7 +231,6 @@ def register(
         user_id=user.id,
         ip_address=ip,
         user_agent=request.headers.get("user-agent"),
-        details={"email": user.email},
     )
     return RegisterResponse(user_id=str(user.id), email=user.email)
 
@@ -296,7 +295,9 @@ def login(
             action="login_failed",
             ip_address=ip,
             user_agent=user_agent,
-            details={"email": body.email},
+            # Keyed, normalized subject: the agent audit view can still group
+            # repeated failures without storing the submitted address.
+            details={"subject": _login_subject_key(body.email, settings.jwt_secret_key)},
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 

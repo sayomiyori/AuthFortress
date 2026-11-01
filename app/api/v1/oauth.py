@@ -184,7 +184,7 @@ async def oauth_callback(
         user_id=user.id,
         ip_address=ip,
         user_agent=request.headers.get("user-agent"),
-        details={"provider": oauth.name, "email": profile.email},
+        details={"provider": oauth.name},
     )
 
     mode = meta.get("response_mode") or "json"

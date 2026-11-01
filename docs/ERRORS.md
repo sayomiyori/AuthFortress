@@ -1,5 +1,20 @@
 # Verified Defects and Regression Checks
 
+## 2026-11-01: Authentication audit rows stored plaintext addresses
+
+- Registration and OAuth callbacks wrote the account address into
+  `audit_logs.details`, and failed password logins wrote the submitted address.
+  New rows no longer carry it: register drops the key (the user UUID remains),
+  OAuth keeps only the provider, and failed logins record the existing keyed,
+  normalized subject (`hmac_sha256(lower(email), JWT_SECRET_KEY)`), so casing
+  variants of one account correlate while no plaintext is stored.
+- Scope is new writes only. Rows written before this change are not rewritten:
+  scrubbing them needs a separate migration with backup and rollback, so it is
+  deliberately out of scope. IP address and user agent are retained by design.
+- Regressions: register and OAuth audit details contain no address and no `@`,
+  failed-login subjects match for `A@Example.com` and `a@example.com`, and the
+  401 response never echoes the attempted address.
+
 ## 2026-11-01: 2FA state changes left sessions alive; enrollment lacked step-up
 
 - Enabling or disabling TOTP committed the factor change without revoking the
