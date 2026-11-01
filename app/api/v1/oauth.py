@@ -13,6 +13,7 @@ from app.config import Settings, get_settings
 from app.core.metrics import auth_login_total
 from app.core.redis_client import get_redis
 from app.db.session import get_db
+from app.models.user import User
 from app.services import auth_service, jwt_service
 from app.services.audit_service import write_audit
 from app.services.oauth.account_service import find_or_link_oauth_user
@@ -145,8 +146,19 @@ async def oauth_callback(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e)) from e
 
-    if not user.is_active:
+    # Linking committed inside find_or_link_oauth_user, so the cached instance can
+    # predate a concurrent deactivation or 2FA change. Re-read under the row lock
+    # and issue inside the same transaction.
+    locked_user = (
+        db.query(User)
+        .filter(User.id == user.id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if locked_user is None or not locked_user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is inactive")
+    user = locked_user
     if user.totp_enabled:
         challenge_response = JSONResponse({
             "requires_2fa": True,
@@ -157,14 +169,6 @@ async def oauth_callback(
 
     ip = request.client.host if request.client else None
     auth_login_total.labels(method="oauth", status="success").inc()
-    write_audit(
-        db,
-        action=oauth_event,
-        user_id=user.id,
-        ip_address=ip,
-        user_agent=request.headers.get("user-agent"),
-        details={"provider": oauth.name, "email": profile.email},
-    )
     access, refresh, _ = auth_service.create_session_and_tokens(
         db,
         settings,
@@ -172,6 +176,15 @@ async def oauth_callback(
         user=user,
         device_info=request.headers.get("user-agent"),
         ip=ip,
+    )
+    # Audit after issuance: write_audit commits, which would release the row lock.
+    write_audit(
+        db,
+        action=oauth_event,
+        user_id=user.id,
+        ip_address=ip,
+        user_agent=request.headers.get("user-agent"),
+        details={"provider": oauth.name, "email": profile.email},
     )
 
     mode = meta.get("response_mode") or "json"

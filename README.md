@@ -104,8 +104,8 @@ Interactive docs available at `http://localhost:28080/docs`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/v1/auth/2fa/setup` | Generate TOTP secret + QR code |
-| `POST` | `/api/v1/auth/2fa/verify` | Confirm setup, receive backup codes |
+| `POST` | `/api/v1/auth/2fa/setup` | Generate TOTP secret + QR code (requires `current_password`) |
+| `POST` | `/api/v1/auth/2fa/verify` | Confirm setup with `code` + `current_password`, receive backup codes |
 | `POST` | `/api/v1/auth/login/2fa` | Complete login when 2FA is enabled |
 | `POST` | `/api/v1/auth/2fa/disable` | Disable 2FA (requires TOTP or backup code) |
 
@@ -168,8 +168,17 @@ Setup flow:
 
 ```
 POST /auth/2fa/setup      → { secret, qr_code_base64, provisioning_uri }
+  body: { current_password }
 POST /auth/2fa/verify     → { backup_codes }   # scans QR first, then confirms
+  body: { code, current_password }
 ```
+
+Enrollment is a step-up action: a stolen access token alone cannot add an
+authenticator. A wrong, missing or malformed password is denied without echoing
+the value, five attempts per minute are allowed per account, and accounts created
+only through OAuth (no local password) cannot enroll until a password or a
+dedicated re-authentication flow exists. The password stored for the account is
+never changed by this endpoint, and a failure revokes no sessions.
 
 ---
 

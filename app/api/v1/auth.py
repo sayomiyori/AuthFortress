@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+from uuid import UUID
 
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
@@ -23,6 +24,7 @@ from app.services import auth_service, jwt_service, totp_service
 from app.services.audit_service import write_audit
 from app.services.jwt_service import create_temp_2fa_token, decode_temp_2fa_token
 from app.services.oauth.token_crypto import decrypt_token, encrypt_token
+from app.services.password import verify_password
 
 router = APIRouter()
 
@@ -40,6 +42,66 @@ def _login_subject_key(email: str, secret: str) -> str:
         email.strip().lower().encode(),
         hashlib.sha256,
     ).hexdigest()
+
+
+def _lock_caller(
+    db: Session,
+    redis_client: Redis,
+    *,
+    user_id: UUID,
+    session_id: str,
+) -> User:
+    """Serialize a 2FA state change on the user row, then revalidate the caller.
+
+    A concurrent change may have revoked this session while the request waited
+    for the row lock, so authentication is re-established under the lock instead
+    of trusting the request-start snapshot.
+    """
+    locked = (
+        db.query(User)
+        .filter(User.id == user_id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    # The request-start active check happened before this lock was acquired; a
+    # direct deactivation may have committed while this request was waiting.
+    if locked is None or not locked.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has ended")
+    if not auth_service.session_is_active(
+        db, redis_client, user_id=locked.id, session_id=session_id
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has ended")
+    return locked
+
+
+def _enforce_stepup_limit(redis_client: Redis, user: User, *, route: str) -> None:
+    """Bound step-up password guesses per user before any bcrypt work."""
+    allowed, retry_after = sliding_window_allow(
+        redis_client, key=f"rl:twofa:stepup:{user.id}", limit=5, window_seconds=60
+    )
+    if not allowed:
+        rate_limit_exceeded_total.labels(route=route).inc()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many 2FA attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+def _verify_current_password(user: User, password: str | None) -> bool:
+    """Step-up check. Missing, malformed or OAuth-only credentials are denied.
+
+    The submitted value is passed to bcrypt untouched; nothing is stripped or
+    normalised, so a password that only differs by whitespace still fails.
+    """
+    if not password or user.hashed_password is None:
+        return False
+    try:
+        return verify_password(password, user.hashed_password)
+    except UnicodeError:
+        # A lone surrogate cannot be UTF-8 encoded; deny instead of a 500.
+        return False
 
 
 class RegisterBody(BaseModel):
@@ -93,8 +155,13 @@ class TwoFASetupResponse(BaseModel):
     provisioning_uri: str
 
 
+class TwoFASetupBody(BaseModel):
+    current_password: str
+
+
 class TwoFAVerifyBody(BaseModel):
     code: str = Field(min_length=6, max_length=8)
+    current_password: str
 
 
 class TwoFAVerifyResponse(BaseModel):
@@ -304,7 +371,15 @@ def login_2fa(
     if not payload.get("jti") or redis_client.get(challenge_key) != payload.get("sub"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid 2FA session")
 
-    user = db.query(User).filter(User.id == UUIDType(str(payload["sub"]))).with_for_update().first()
+    user = (
+        db.query(User)
+        .filter(User.id == UUIDType(str(payload["sub"])))
+        # The lock must also refresh a cached instance, or a code consumed by a
+        # concurrent request could still look unused.
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
     if not user or not user.is_active or not user.totp_enabled:
         auth_login_total.labels(method="2fa", status="failed").inc()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid 2FA session")
@@ -334,7 +409,9 @@ def login_2fa(
         db.rollback()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="2FA code already used")
     if ok_backup:
-        db.commit()
+        # Keep the user-row lock until issuance so a concurrent 2FA state change
+        # cannot interleave between consuming the code and creating the session.
+        db.flush()
 
     access, refresh, _ = auth_service.create_session_and_tokens(
         db,
@@ -432,10 +509,27 @@ def logout(
 @router.post("/2fa/setup", response_model=TwoFASetupResponse)
 def twofa_setup(
     request: Request,
+    body: TwoFASetupBody,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current: User = Depends(get_current_user),
+    current_session_id: str = Depends(get_current_session_id),
+    redis_client: Redis = Depends(get_redis),
 ):
+    _enforce_stepup_limit(redis_client, current, route="twofa_setup")
+    current = _lock_caller(
+        db, redis_client, user_id=current.id, session_id=current_session_id
+    )
+    if not _verify_current_password(current, body.current_password):
+        write_audit(
+            db,
+            action="2fa_setup",
+            user_id=current.id,
+            ip_address=_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            details={"result": "invalid_password"},
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid current password")
     if current.totp_enabled:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Disable existing 2FA before setup")
     secret = totp_service.generate_totp_secret()
@@ -466,7 +560,23 @@ def twofa_verify(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current: User = Depends(get_current_user),
+    current_session_id: str = Depends(get_current_session_id),
+    redis_client: Redis = Depends(get_redis),
 ):
+    _enforce_stepup_limit(redis_client, current, route="twofa_verify")
+    current = _lock_caller(
+        db, redis_client, user_id=current.id, session_id=current_session_id
+    )
+    if not _verify_current_password(current, body.current_password):
+        write_audit(
+            db,
+            action="2fa_verify",
+            user_id=current.id,
+            ip_address=_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            details={"result": "invalid_password"},
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid current password")
     if current.totp_enabled:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="2FA is already enabled")
     secret_plain = decrypt_token(settings, current.totp_secret_encrypted or "")
@@ -485,7 +595,13 @@ def twofa_verify(
     plain_codes = totp_service.generate_backup_codes(10)
     current.backup_codes_hashed = [totp_service.hash_backup_code(c) for c in plain_codes]
     current.totp_enabled = True
-    db.commit()
+    # Enabling 2FA must not leave a session issued before enrolment alive.
+    revoked = auth_service.revoke_user_sessions(
+        db,
+        redis_client,
+        user_id=current.id,
+        except_session_id=current_session_id,
+    )
     totp_setup_total.labels(status="success").inc()
     write_audit(
         db,
@@ -493,7 +609,7 @@ def twofa_verify(
         user_id=current.id,
         ip_address=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
-        details={"result": "enabled"},
+        details={"result": "enabled", "sessions_revoked": revoked},
     )
     return TwoFAVerifyResponse(backup_codes=plain_codes)
 
@@ -505,6 +621,7 @@ def twofa_disable(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current: User = Depends(get_current_user),
+    current_session_id: str = Depends(get_current_session_id),
     redis_client: Redis = Depends(get_redis),
 ):
     allowed, retry_after = sliding_window_allow(
@@ -518,7 +635,9 @@ def twofa_disable(
             headers={"Retry-After": str(retry_after)},
         )
     # Reload under the same row lock as login to serialize backup-code consumption.
-    current = db.query(User).filter(User.id == current.id).populate_existing().with_for_update().one()
+    current = _lock_caller(
+        db, redis_client, user_id=current.id, session_id=current_session_id
+    )
     if not current.totp_secret_encrypted:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No 2FA secret to disable")
 
@@ -546,13 +665,19 @@ def twofa_disable(
     current.totp_secret_encrypted = None
     current.totp_enabled = False
     current.backup_codes_hashed = None
-    db.commit()
+    # Disabling 2FA is a downgrade: sessions opened while it was enabled end here.
+    revoked = auth_service.revoke_user_sessions(
+        db,
+        redis_client,
+        user_id=current.id,
+        except_session_id=current_session_id,
+    )
     write_audit(
         db,
         action="2fa_disable",
         user_id=current.id,
         ip_address=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
-        details={"result": "disabled"},
+        details={"result": "disabled", "sessions_revoked": revoked},
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
