@@ -1,5 +1,14 @@
 # Verified Defects and Regression Checks
 
+## 2026-10-12: Validation diagnostics echoed authentication payloads
+
+A registration request without username returned HTTP 422 containing the whole
+request body, including its password. The default RequestValidationError handler
+serialized Pydantic input/context diagnostics. Sanitize those two fields globally
+while retaining the existing 422 status and detail/type/loc/msg structure.
+Four regressions cover incomplete registration/login/2FA and malformed refresh
+payloads; synthetic markers must never appear in the response.
+
 ## 2026-10-09: Registration race and audit responsiveness
 
 - Concurrent registration passed the email pre-check twice, then returned 500

@@ -6,6 +6,21 @@ from app.models.audit import AuditLog
 from app.models.user import User, UserRole
 
 
+@pytest.mark.parametrize("path,payload", [
+    ("register", {"email": "validation@example.com", "password": "Synthetic-Validation-Marker-9!"}),
+    ("login", {"password": "Synthetic-Validation-Marker-9!"}),
+    ("login/2fa", {"temp_token": "Synthetic-Validation-Marker-9!"}),
+    ("refresh", {"refresh_token": ["Synthetic-Validation-Marker-9!"]}),
+])
+def test_validation_errors_do_not_echo_authentication_payloads(client, path, payload):
+    response = client.post(f"/api/v1/auth/{path}", json=payload)
+    assert response.status_code == 422
+    assert "Synthetic-Validation-Marker-9!" not in response.text
+    errors = response.json()["detail"]
+    assert errors and all({"type", "loc", "msg"} <= error.keys() for error in errors)
+    assert all("input" not in error and "ctx" not in error for error in errors)
+
+
 @pytest.fixture
 def registered_user(client):
     body = {"email": "failure@example.com", "password": "Secure1pass", "username": "failure"}
