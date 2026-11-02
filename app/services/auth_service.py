@@ -180,6 +180,32 @@ def refresh_tokens(
     return access, new_refresh
 
 
+def session_is_active(
+    db: Session,
+    redis_client,
+    *,
+    user_id: UUID,
+    session_id: str,
+) -> bool:
+    """Re-check the caller's own session after waiting on the user-row lock."""
+    try:
+        sid = UUID(str(session_id))
+    except ValueError:
+        return False
+    session = (
+        db.query(UserSession)
+        .filter(UserSession.id == sid, UserSession.user_id == user_id)
+        # The identity map may still hold the pre-lock row; re-read it.
+        .populate_existing()
+        .first()
+    )
+    if session is None or session.revoked_at is not None:
+        return False
+    if _as_utc(session.expires_at) < datetime.now(UTC):
+        return False
+    return bool(redis_client.exists(f"session:{sid}"))
+
+
 def revoke_session_rows(
     sessions,
     redis_client,

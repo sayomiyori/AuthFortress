@@ -1,5 +1,60 @@
 # Verified Defects and Regression Checks
 
+## 2026-11-01: Authentication audit rows stored plaintext addresses
+
+- Registration and OAuth callbacks wrote the account address into
+  `audit_logs.details`, and failed password logins wrote the submitted address.
+  New rows no longer carry it: register drops the key (the user UUID remains),
+  OAuth keeps only the provider, and failed logins record the existing keyed,
+  normalized subject (`hmac_sha256(lower(email), JWT_SECRET_KEY)`), so casing
+  variants of one account correlate while no plaintext is stored.
+- Scope is new writes only. Rows written before this change are not rewritten:
+  scrubbing them needs a separate migration with backup and rollback, so it is
+  deliberately out of scope. IP address and user agent are retained by design.
+- Regressions: register and OAuth audit details contain no address and no `@`,
+  failed-login subjects match for `A@Example.com` and `a@example.com`, and the
+  401 response never echoes the attempted address.
+
+## 2026-11-01: 2FA state changes left sessions alive; enrollment lacked step-up
+
+- Enabling or disabling TOTP committed the factor change without revoking the
+  user's other sessions, so a session created before the change survived it.
+  Both endpoints now hold the user row lock, revalidate the caller's own session
+  after acquiring it, reject a row that became inactive while waiting, revoke
+  every other session in the same transaction, and keep the calling session.
+- Backup-code login committed the consumed code before issuing tokens, releasing
+  the user row lock early; a concurrent 2FA change could then be followed by a
+  new session. The lock is now held through issuance, and the consumed code and
+  the session row commit together.
+- The OAuth callback read `is_active`/`totp_enabled` from a cached instance after
+  linking had committed, then wrote an audit row (which commits) before issuing.
+  It now re-reads the user under the row lock, evaluates policy on that instance,
+  and issues before auditing.
+- Enrolling 2FA required only a bearer token, so a stolen access token could add
+  an authenticator and lock the owner out. Setup and verify now require
+  `current_password`, checked with the existing bcrypt helper under the same user
+  lock, bounded by five shared step-up attempts per account per minute before
+  bcrypt and before the lock. Missing, wrong, oversized, malformed-Unicode and
+  OAuth-only (no local password) input is denied generically without echoing the
+  value; failures revoke nothing. An explicit OAuth re-authentication flow is
+  still open, so OAuth-only accounts cannot enroll yet.
+- Regressions: session revocation on enable/disable, caller retention, no
+  revocation on failure, backup-code rollback, OAuth deactivation between link
+  and issuance, stolen bearer without password, shared limiter with 429
+  Retry-After, OAuth-only denial, escaped-surrogate password, and the fresh
+  inactive guard. Full suite 231 passed; Ruff and Mypy pass. A pristine
+  `116ffdb` control fails thirteen of these cases, so the tests discriminate the
+  old behaviour.
+
+## 2026-10-12: Validation diagnostics echoed authentication payloads
+
+A registration request without username returned HTTP 422 containing the whole
+request body, including its password. The default RequestValidationError handler
+serialized Pydantic input/context diagnostics. Sanitize those two fields globally
+while retaining the existing 422 status and detail/type/loc/msg structure.
+Four regressions cover incomplete registration/login/2FA and malformed refresh
+payloads; synthetic markers must never appear in the response.
+
 ## 2026-10-09: Registration race and audit responsiveness
 
 - Concurrent registration passed the email pre-check twice, then returned 500

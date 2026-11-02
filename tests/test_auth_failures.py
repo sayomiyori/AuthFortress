@@ -1,9 +1,28 @@
+import hashlib
+import hmac
+import json
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import jwt
 import pytest
 from app.models.audit import AuditLog
 from app.models.user import User, UserRole
+
+
+@pytest.mark.parametrize("path,payload", [
+    ("register", {"email": "validation@example.com", "password": "Synthetic-Validation-Marker-9!"}),
+    ("login", {"password": "Synthetic-Validation-Marker-9!"}),
+    ("login/2fa", {"temp_token": "Synthetic-Validation-Marker-9!"}),
+    ("refresh", {"refresh_token": ["Synthetic-Validation-Marker-9!"]}),
+])
+def test_validation_errors_do_not_echo_authentication_payloads(client, path, payload):
+    response = client.post(f"/api/v1/auth/{path}", json=payload)
+    assert response.status_code == 422
+    assert "Synthetic-Validation-Marker-9!" not in response.text
+    errors = response.json()["detail"]
+    assert errors and all({"type", "loc", "msg"} <= error.keys() for error in errors)
+    assert all("input" not in error and "ctx" not in error for error in errors)
 
 
 @pytest.fixture
@@ -125,3 +144,48 @@ def test_http_audit_is_written_to_test_database(client, db_session):
     record = db_session.query(AuditLog).filter_by(action="auth.http").one()
     assert record.details["path"] == "/api/v1/auth/me"
     assert record.details["status_code"] == 401
+
+
+def test_register_audit_does_not_store_email(client, db_session):
+    email = f"privacy-{uuid4().hex}@example.com"
+    credentials = {"email": email, "password": "Secure1pass", "username": "privacy"}
+    assert client.post("/api/v1/auth/register", json=credentials).status_code == 200
+
+    record = db_session.query(AuditLog).filter_by(action="register").one()
+    rendered = json.dumps(record.details or {})
+    assert record.user_id is not None
+    assert email not in rendered
+    assert "@" not in rendered
+
+
+def test_login_failure_audit_uses_normalized_keyed_subject(
+    client, db_session, test_settings
+):
+    email = f"Privacy-{uuid4().hex}@Example.com"
+    credentials = {"email": email, "password": "Secure1pass", "username": "privacy"}
+    assert client.post("/api/v1/auth/register", json=credentials).status_code == 200
+
+    for attempted in (email, email.upper()):
+        response = client.post(
+            "/api/v1/auth/login", json={"email": attempted, "password": "Wrong1pass"}
+        )
+        assert response.status_code == 401
+        assert attempted not in response.text
+
+    rows = (
+        db_session.query(AuditLog)
+        .filter_by(action="login_failed")
+        .order_by(AuditLog.created_at)
+        .all()
+    )
+    expected = hmac.new(
+        test_settings.jwt_secret_key.encode(),
+        email.strip().lower().encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    assert [row.details["subject"] for row in rows] == [expected, expected]
+    for row in rows:
+        rendered = json.dumps(row.details)
+        assert email not in rendered
+        assert "@" not in rendered
+        assert "email" not in row.details

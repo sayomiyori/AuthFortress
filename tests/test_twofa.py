@@ -9,27 +9,39 @@ def twofa_user(client):
     assert client.post("/api/v1/auth/register", json=credentials).status_code == 200
     login = client.post("/api/v1/auth/login", json=credentials).json()
     headers = {"Authorization": f"Bearer {login['access_token']}"}
-    setup = client.post("/api/v1/auth/2fa/setup", headers=headers)
+    setup = client.post(
+        "/api/v1/auth/2fa/setup",
+        json={"current_password": credentials["password"]},
+        headers=headers,
+    )
     assert setup.status_code == 200
     secret = setup.json()["secret"]
     verification = client.post(
-        "/api/v1/auth/2fa/verify", json={"code": pyotp.TOTP(secret).now()}, headers=headers
+        "/api/v1/auth/2fa/verify",
+        json={"code": pyotp.TOTP(secret).now(), "current_password": credentials["password"]},
+        headers=headers,
     )
     assert verification.status_code == 200
     return credentials, headers, secret, verification.json()["backup_codes"]
 
 
 def test_enabled_twofa_cannot_be_reset_with_access_token(client, twofa_user, db_session):
-    _, headers, _, _ = twofa_user
-    response = client.post("/api/v1/auth/2fa/setup", headers=headers)
+    credentials, headers, _, _ = twofa_user
+    response = client.post(
+        "/api/v1/auth/2fa/setup",
+        json={"current_password": credentials["password"]},
+        headers=headers,
+    )
     assert response.status_code == 409
     assert db_session.query(User).filter_by(email="twofa@example.com").one().totp_enabled
 
 
 def test_enabled_twofa_cannot_regenerate_backup_codes(client, twofa_user):
-    _, headers, secret, _ = twofa_user
+    credentials, headers, secret, _ = twofa_user
     response = client.post(
-        "/api/v1/auth/2fa/verify", json={"code": pyotp.TOTP(secret).now()}, headers=headers
+        "/api/v1/auth/2fa/verify",
+        json={"code": pyotp.TOTP(secret).now(), "current_password": credentials["password"]},
+        headers=headers,
     )
     assert response.status_code == 409
 

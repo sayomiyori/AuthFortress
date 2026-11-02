@@ -2,6 +2,7 @@ import json
 
 import pytest
 from app.config import Settings
+from app.models.audit import AuditLog
 from app.models.oauth_account import OAuthAccount
 from app.models.session import UserSession
 from app.models.user import User
@@ -219,3 +220,20 @@ def test_oauth_callback_rejects_non_ascii_state(client, monkeypatch):
         "/api/v1/oauth/google/callback", params={"code": "test", "state": "invalid-\u0441\u0442\u0430\u0442\u0435"}
     )
     assert response.status_code == 400
+
+
+def test_oauth_callback_audit_does_not_store_email(client, db_session, monkeypatch):
+    _patch_google_factory(monkeypatch)
+    client.get("/api/v1/oauth/google/authorize", follow_redirects=False)
+    state = client.cookies.get("oauth_state")
+    assert state
+    response = client.get(
+        "/api/v1/oauth/google/callback", params={"code": "test", "state": state}
+    )
+    assert response.status_code == 200
+
+    record = db_session.query(AuditLog).filter_by(action="oauth_register").one()
+    assert record.details == {"provider": "google"}
+    rendered = json.dumps(record.details)
+    assert "oauth_new@example.com" not in rendered
+    assert "@" not in rendered

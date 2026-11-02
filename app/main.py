@@ -1,6 +1,8 @@
-from fastapi import Depends, FastAPI, Response
+from fastapi import Depends, FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from starlette.responses import JSONResponse
 
 from app.api.internal import router as internal_router
 from app.api.v1 import api_router
@@ -16,6 +18,18 @@ app = FastAPI(title=settings.app_name, debug=settings.debug)
 app.add_middleware(AuditMiddleware)
 app.include_router(api_router)
 app.include_router(internal_router)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    # Missing-field errors otherwise echo the whole authentication payload.
+    return JSONResponse(
+        status_code=422,
+        content={"detail": [
+            {key: value for key, value in error.items() if key not in {"input", "ctx"}}
+            for error in exc.errors()
+        ]},
+    )
 
 
 @app.get("/")
