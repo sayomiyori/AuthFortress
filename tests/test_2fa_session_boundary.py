@@ -8,6 +8,7 @@ own transaction and both threads actually contend for the user row lock.
 """
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -20,7 +21,8 @@ from app.core.security import get_current_user, security_scheme
 from app.db.session import get_db
 from app.main import app
 from app.models.audit import AuditLog
-from app.models.user import User
+from app.models.user import User, UserRole
+from app.services import auth_service
 from app.services.auth_service import create_session_and_tokens
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials
@@ -495,3 +497,112 @@ def test_deactivating_account_while_waiting_is_rejected(committed_env, db_engine
         headers=headers,
     )
     assert response.status_code == 401
+
+
+def _wait_for_row_lock_waiter(db_engine, timeout: float = 10.0) -> bool:
+    """Return True once a backend is blocked on a ``SELECT ... FOR UPDATE``.
+
+    Polling ``pg_stat_activity`` proves the block request is actually queued on
+    the user-row lock instead of relying on a sleep long enough to look like it.
+    """
+    statement = text(
+        "SELECT count(*) FROM pg_stat_activity "
+        "WHERE datname = current_database() "
+        "AND wait_event_type = 'Lock' "
+        "AND query ILIKE '%FOR UPDATE%'"
+    )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with db_engine.connect() as connection:
+            if connection.execute(statement).scalar_one():
+                return True
+        time.sleep(0.05)
+    return False
+
+
+def test_login_racing_block_cannot_leave_a_surviving_session(
+    committed_env, db_engine, test_settings, redis_client, monkeypatch
+):
+    """A login that commits while a block waits must not survive the block.
+
+    The login holds the user-row lock through issuance. The block starts after
+    that lock is held and waits for it; with the fix it revokes every session
+    committed while it waited, so unblocking cannot revive the issued token.
+    """
+    victim_email = f"block-race-{uuid4().hex}@example.com"
+    admin_email = f"block-admin-{uuid4().hex}@example.com"
+    committed_env.emails.extend([victim_email, admin_email])
+    password = "Secure1pass"
+
+    with committed_env.session() as db:
+        admin = User(email=admin_email, username="block-admin", role=UserRole.admin)
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+        admin_access, _, _ = create_session_and_tokens(
+            db, test_settings, redis_client, user=admin, device_info=None, ip=None
+        )
+        admin_headers = {"Authorization": f"Bearer {admin_access}"}
+
+    bootstrap = TestClient(app)
+    credentials = {"email": victim_email, "password": password, "username": "block-race"}
+    assert bootstrap.post("/api/v1/auth/register", json=credentials).status_code == 200
+    with committed_env.session() as db:
+        victim_id = db.query(User.id).filter(User.email == victim_email).scalar()
+
+    real_create = auth_service.create_session_and_tokens
+    login_ready = threading.Event()
+    release_login = threading.Event()
+
+    def gated_create(*args, **kwargs):
+        # authenticate_user already holds the user-row lock at this point.
+        login_ready.set()
+        if not release_login.wait(timeout=30):
+            raise RuntimeError("login gate timed out")
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(auth_service, "create_session_and_tokens", gated_create)
+
+    def login():
+        return TestClient(app).post(
+            "/api/v1/auth/login",
+            json={"email": victim_email, "password": password},
+        )
+
+    def block():
+        return TestClient(app).patch(
+            f"/api/v1/admin/users/{victim_id}/block",
+            json={"blocked": True},
+            headers=admin_headers,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        block_future = None
+        waited = False
+        login_future = pool.submit(login)
+        try:
+            assert login_ready.wait(timeout=10), "login never reached issuance"
+            block_future = pool.submit(block)
+            waited = _wait_for_row_lock_waiter(db_engine)
+        finally:
+            release_login.set()
+        login_response = login_future.result(timeout=30)
+        assert block_future is not None
+        block_response = block_future.result(timeout=30)
+
+    assert login_response.status_code == 200, login_response.text
+    assert block_response.status_code == 200, block_response.text
+    issued = {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+    assert TestClient(app).get("/api/v1/auth/me", headers=issued).status_code == 401
+
+    unblocked = TestClient(app).patch(
+        f"/api/v1/admin/users/{victim_id}/block",
+        json={"blocked": False},
+        headers=admin_headers,
+    )
+    assert unblocked.status_code == 200
+    assert TestClient(app).get("/api/v1/auth/me", headers=issued).status_code == 401
+
+    # Serialization is part of the fix: a block that never waits on the user
+    # row can miss a session that issuance committed after its read.
+    assert waited, "block request did not wait on the user-row lock"

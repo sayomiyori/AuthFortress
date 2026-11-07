@@ -175,13 +175,23 @@ def update_user(
         return user
 
     revoked = 0
-    if email_changed or password_changed:
-        # The helper commits the credential change and the revocations together.
+    deactivated = active_changed and not user.is_active
+    reactivated = active_changed and user.is_active
+    if email_changed or password_changed or deactivated or reactivated:
+        # The helper commits the credential/active change and the revocations
+        # together. Deactivation ends every session, including a self-blocked
+        # caller's; reactivation revokes sessions that predate an out-of-band
+        # deactivation; credential changes keep the caller's own session. The
+        # active -> active path stays a no-op.
         revoked = auth_service.revoke_user_sessions(
             db,
             redis_client,
             user_id=user.id,
-            except_session_id=current_session_id if actor.id == user.id else None,
+            except_session_id=(
+                None
+                if deactivated or reactivated
+                else (current_session_id if actor.id == user.id else None)
+            ),
         )
     else:
         db.commit()

@@ -1,5 +1,33 @@
 # Verified Defects and Regression Checks
 
+## 2026-11-07: Blocking an account left its sessions alive
+
+- `PATCH /api/v1/admin/users/{id}/block` only flipped `is_active`; it did not
+  revoke the target's `UserSession` rows or Redis `session:{sid}` keys. Access
+  tokens were rejected while the account stayed blocked (the per-request active
+  check), but unblocking silently revived every session issued before the block.
+  The endpoint also took no user-row lock, so a login, OAuth callback or 2FA
+  completion committing between the block read and update could create a session
+  that the block never saw.
+- Blocking now locks the user row, sets the account inactive and revokes all of
+  its sessions. The `User.is_active` update and every `UserSession.revoked_at`
+  write commit together; Redis `session:{sid}` deletion is best-effort cache
+  cleanup, and the DB row is authoritative if eviction fails. A concurrent
+  issuance waits on the same row lock and either fails on the inactive account
+  or has its session revoked. `PATCH /api/v1/users/{id}` with `is_active: false`
+  follows the same rule.
+- Unblocking and reactivation also revoke every remaining session, including for
+  accounts that were already inactive before this fix or were deactivated out of
+  band. Without that, the per-request active check would let a pre-existing
+  session revive the moment `is_active` flipped back to true. Neither path
+  recreates sessions; the user must sign in again. Active -> active calls stay a
+  no-op and do not revoke anything.
+- Regressions: block then unblock leaves the pre-block access token at 401 while
+  a fresh login works; the equivalent `is_active` PATCH covers the second
+  deactivation path. A directly seeded inactive account with a live session is
+  rejected after both reactivation endpoints, and the login-vs-block race test
+  proves the block request actually waits for the user-row lock.
+
 ## 2026-11-01: Authentication audit rows stored plaintext addresses
 
 - Registration and OAuth callbacks wrote the account address into
