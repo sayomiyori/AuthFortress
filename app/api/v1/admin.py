@@ -107,20 +107,36 @@ def admin_block_user(
     body: BlockBody,
     db: Session = Depends(get_db),
     actor: User = Depends(require_min_role(UserRole.admin)),
+    redis_client=Depends(get_redis),
 ):
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == user_id).with_for_update().first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if not can_manage_user(actor, user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot modify this user")
+    was_active = user.is_active
     user.is_active = not body.blocked
-    db.commit()
+    revoked = 0
+    if body.blocked or not was_active:
+        # A block must end every session issued while the account was active;
+        # otherwise unblocking would revive a stolen or pre-block session.
+        # Reactivation revokes too: an account that was already inactive before
+        # this endpoint owned the block, or was deactivated out of band, can
+        # still hold unrevoked sessions that would come back to life. The
+        # active -> active path stays a no-op.
+        revoked = auth_service.revoke_user_sessions(db, redis_client, user_id=user.id)
+    else:
+        db.commit()
     db.refresh(user)
     write_audit(
         db,
         action="user_blocked" if body.blocked else "user_unblocked",
         user_id=actor.id,
-        details={"target_user_id": str(user_id), "blocked": body.blocked},
+        details={
+            "target_user_id": str(user_id),
+            "blocked": body.blocked,
+            "sessions_revoked": revoked,
+        },
     )
     return user
 
