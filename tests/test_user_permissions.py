@@ -1,9 +1,12 @@
 import jwt
 import pytest
+from app.core.redis_client import get_redis
+from app.main import app
 from app.models.audit import AuditLog
 from app.models.session import UserSession
 from app.models.user import User, UserRole
 from app.services.auth_service import create_session_and_tokens
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 
 @pytest.fixture
@@ -264,3 +267,54 @@ def test_active_to_active_state_calls_do_not_revoke(
     )
     assert reactivated.status_code == 200
     assert client.get("/api/v1/auth/me", headers=target_headers).status_code == 200
+
+
+class _RedisDeleteFails:
+    """Delegates to the real client except that session-key deletion always fails."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.delete_requests: list[str] = []
+
+    def delete(self, *keys):
+        self.delete_requests.extend(keys)
+        raise RedisConnectionError("simulated cache outage")
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_revocation_is_db_authoritative_when_redis_delete_fails(
+    client, actors, db_session, redis_client
+):
+    headers = _register_and_login(client, "redis-delete-fail@example.com")
+    target = db_session.query(User).filter_by(email="redis-delete-fail@example.com").one()
+    session = db_session.query(UserSession).filter_by(user_id=target.id).one()
+    assert session.revoked_at is None
+    assert redis_client.exists(f"session:{session.id}")
+
+    failing_redis = _RedisDeleteFails(redis_client)
+    app.dependency_overrides[get_redis] = lambda: failing_redis
+    _, admin_headers = actors[UserRole.admin]
+    updated = client.patch(
+        f"/api/v1/users/{target.id}",
+        json={"password": "Rotated1pass"},
+        headers=admin_headers,
+    )
+
+    # The cache outage must be contained: no 500 and the revocation still commits.
+    assert updated.status_code == 200
+    assert failing_redis.delete_requests == [f"session:{session.id}"]
+    db_session.refresh(session)
+    assert session.revoked_at is not None
+    # The delete never succeeded, so the Redis key is still there. The account
+    # also stays active; only the DB revocation row can reject the old token.
+    assert redis_client.exists(f"session:{session.id}")
+    assert target.is_active
+    assert client.get("/api/v1/auth/me", headers=headers).status_code == 401
+
+    fresh = client.post(
+        "/api/v1/auth/login",
+        json={"email": "redis-delete-fail@example.com", "password": "Rotated1pass"},
+    )
+    assert fresh.status_code == 200
