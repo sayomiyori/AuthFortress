@@ -11,12 +11,13 @@ from app.core.rbac import can_manage_user
 from app.core.security import get_current_user
 from app.models.session import UserSession
 from app.models.user import User, UserRole
-from app.services.auth_service import revoke_session_rows
+from app.services.auth_service import revoke_session_rows, revoke_user_sessions
 from app.services.oauth.account_service import find_or_link_oauth_user
 from app.services.oauth.base import OAuthUserProfile
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import ValidationError
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 SECRET = "unit-test-secret-key-with-enough-unique-characters-123"
 
@@ -207,6 +208,55 @@ def test_revoke_session_rows_skips_current_and_clears_redis():
     assert first.revoked_at is None
     assert second.revoked_at is not None
     assert redis.deleted == [f"session:{second.id}"]
+
+
+class _AllSessions:
+    def __init__(self, sessions):
+        self.sessions = sessions
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def all(self):
+        return self.sessions
+
+
+class _SessionDB:
+    def __init__(self, sessions):
+        self.sessions = sessions
+        self.commits = 0
+
+    def query(self, model):
+        return _AllSessions(self.sessions)
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_revoke_user_sessions_keeps_db_revocation_when_redis_delete_fails():
+    first = SimpleNamespace(id=uuid.uuid4(), revoked_at=None)
+    second = SimpleNamespace(id=uuid.uuid4(), revoked_at=None)
+    db = _SessionDB([first, second])
+
+    class FailingRedis:
+        def __init__(self):
+            self.delete_requests = []
+
+        def delete(self, key):
+            self.delete_requests.append(key)
+            raise RedisConnectionError("simulated cache outage")
+
+    redis = FailingRedis()
+    revoked = revoke_user_sessions(
+        db, redis, user_id=uuid.uuid4(), except_session_id=str(first.id)
+    )
+
+    # A cache outage must not abort or skip the DB-authoritative revocation.
+    assert revoked == 1
+    assert db.commits == 1
+    assert first.revoked_at is None
+    assert second.revoked_at is not None
+    assert redis.delete_requests == [f"session:{second.id}"]
 
 
 def test_can_manage_user_rules():
