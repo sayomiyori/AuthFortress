@@ -142,6 +142,17 @@ class RefreshBody(BaseModel):
     refresh_token: str
 
 
+class LogoutRefreshBody(BaseModel):
+    # ``extra="forbid"`` would report an unknown key in the error's ``loc``, and
+    # the shared validation handler keeps ``loc``; a caller that sends the
+    # refresh token as an extra *field name* would then get that token echoed in
+    # the ``422`` body. Ignoring extras still rejects a malformed or missing
+    # ``refresh_token`` value without reflecting unrelated input.
+    model_config = ConfigDict(extra="ignore")
+
+    refresh_token: str
+
+
 class MeResponse(BaseModel):
     id: str
     email: str
@@ -495,11 +506,59 @@ def logout(
     redis_client: Redis = Depends(get_redis),
     current: User = Depends(get_current_user),
 ):
+    # The public contract is unchanged: a valid Bearer access token is
+    # required, and request bodies are ignored exactly as before.
     auth_service.logout_session(db, redis_client, session_id=session_id)
     write_audit(
         db,
         action="logout",
         user_id=current.id,
+        ip_address=_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        details={"session_id": session_id},
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/logout/refresh", status_code=status.HTTP_204_NO_CONTENT)
+def logout_with_refresh(
+    request: Request,
+    body: LogoutRefreshBody,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    redis_client: Redis = Depends(get_redis),
+):
+    """Revoke the one session named by an optional refresh credential.
+
+    This endpoint is separate from ``POST /logout`` so the original route keeps
+    its exact bearer-only, body-agnostic contract. The JSON body must carry a
+    ``refresh_token``; a missing body, non-object body, malformed JSON or
+    malformed/missing field returns ``422`` before any token is examined.
+
+    A correctly signed, unexpired refresh JWT revokes the session named by its
+    own ``sid`` even if the token was already rotated away, which lets a client
+    whose access token expired still end its session. The token never
+    authenticates, and ``session.user_id`` must equal ``sub``, so it can never
+    revoke a session belonging to another account. Revocation is idempotent and
+    the database row is authoritative; Redis eviction is best-effort.
+    """
+    try:
+        user_id, session_id = auth_service.logout_session_with_refresh_token(
+            db,
+            settings,
+            redis_client,
+            refresh_token=body.refresh_token,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+        ) from exc
+
+    write_audit(
+        db,
+        action="logout",
+        user_id=user_id,
         ip_address=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
         details={"session_id": session_id},

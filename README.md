@@ -88,7 +88,8 @@ Interactive docs available at `http://localhost:28080/docs`.
 | `POST` | `/api/v1/auth/register` | Register a new user |
 | `POST` | `/api/v1/auth/login` | Login (returns access + refresh tokens) |
 | `POST` | `/api/v1/auth/refresh` | Rotate refresh token |
-| `POST` | `/api/v1/auth/logout` | Revoke current session |
+| `POST` | `/api/v1/auth/logout` | Revoke current session (Bearer access token; body ignored) |
+| `POST` | `/api/v1/auth/logout/refresh` | Revoke one session with a refresh token (for expired access tokens) |
 | `GET`  | `/api/v1/auth/me` | Current user info |
 
 ### OAuth2
@@ -190,6 +191,34 @@ Each `/auth/refresh` call:
 3. Invalidates the old refresh token immediately
 
 Replaying the old token returns `401 Unauthorized`.
+
+---
+
+## Session Termination
+
+`POST /auth/logout` keeps its original contract: it requires a valid Bearer
+access token, ignores the request body entirely (including malformed or
+non-object JSON), returns `204` on success, and returns `401` when the token is
+missing, invalid, expired or revoked. A refresh token in a logout body is not
+accepted as authentication on this route.
+
+`POST /auth/logout/refresh` is the separate endpoint for clients whose access
+token has expired. It takes a JSON object with a required `refresh_token`:
+
+```json
+{"refresh_token": "<refresh token>"}
+```
+
+A missing body, non-object body, malformed JSON or missing/malformed
+`refresh_token` returns `422` before any token is examined. Unknown fields are
+ignored so that unrelated input, including a token sent as an extra field name,
+is never echoed. The session named by the token's `sid` is revoked even if that
+refresh token was already rotated. The refresh token is never accepted as
+authentication, and the session's `user_id` must match the token's `sub`, so a
+token for one account cannot revoke another account's session. Logout is
+idempotent, and the database revocation is authoritative if Redis is
+unavailable. The same revocation helper backs admin session revocation, so that
+path is equally durable.
 
 ---
 

@@ -1,5 +1,72 @@
 # Verified Defects and Regression Checks
 
+## 2026-11-08: Logout could not revoke a session after the access token expired
+
+- `POST /api/v1/auth/logout` required a valid access token, so a client whose
+  15-minute access token had expired had no way to end its own session; the
+  `UserSession` row and the Redis `session:{sid}` key survived until natural
+  expiry. The revocation helper also read the session without a row lock and
+  surfaced a Redis delete failure as a server error after the database row had
+  already been revoked.
+- The refresh-credential flow is a separate `POST /api/v1/auth/logout/refresh`
+  endpoint. The original `POST /api/v1/auth/logout` keeps its exact signature
+  and dependency set and remains bearer-only and body-agnostic: malformed JSON,
+  non-object bodies and extra fields are still ignored, valid access-token
+  logout still returns `204`, and a refresh token in the body is not
+  authentication.
+- `POST /api/v1/auth/logout/refresh` requires a JSON object with a required
+  `refresh_token`; a missing body, non-object body, malformed JSON, or missing
+  or non-string field returns `422` before any token is examined. The refresh
+  JWT is accepted only when its signature, a required finite numeric `exp`,
+  `type=refresh`, `sub`, `sid` and `jti` are valid. A missing or malformed `exp`
+  is rejected locally in this path; the shared decoder is unchanged for login,
+  refresh and access checks. It revokes the single session named by its own
+  `sid`; `session.user_id` must equal `sub`, so a token for one account cannot
+  revoke another account's session. It is never accepted as authentication. The
+  stored hash of the current `jti` is deliberately not required, so a
+  previously rotated refresh token can end its own session.
+- Both logout paths select the session row `FOR UPDATE` with
+  `populate_existing` before revoking, sharing the lock used by refresh
+  rotation. A refresh that commits first has its new token pair invalidated by
+  the revocation that follows; a refresh that waits observes `revoked_at` and
+  fails. No user-row lock is taken, so the order stays session lock -> plain
+  user read and cannot deadlock with the 2FA paths that lock the user first.
+  Revocation is idempotent and the database row is authoritative; deleting the
+  Redis key is best-effort. `logout_session` is shared with
+  `DELETE /api/v1/admin/sessions/{id}`, whose `403`/`404`/`204` responses are
+  unchanged; admin revocation gains the same row lock and best-effort cache
+  eviction.
+- Redis outage: the refresh endpoint does not perform the access-token Redis
+  `exists` check, so an access-cache outage cannot block durable revocation. A
+  Redis `delete` failure is swallowed after the database commit.
+- Trade-off: any still-valid older refresh JWT for a session can force that
+  session to log out (self-denial of service). It cannot mint tokens, cannot
+  authenticate a protected endpoint, and cannot revoke a different session.
+- Privacy: the refresh token is accepted only in the request body, is never
+  echoed and is never written to the audit row; `logout` still records only
+  `session_id` with the user UUID, and denial details stay generic. Unknown
+  body fields are ignored before validation, so a token sent as an extra JSON
+  *field name* is not reflected, and a malformed `refresh_token` value reports
+  only the `body.refresh_token` location. Other routes keep their existing
+  validation behavior.
+- Regressions: expired-access plus refresh-endpoint logout (`204`, then `/me`
+  and `/refresh` `401`); a rotated-away refresh token revokes its own session
+  while a sibling session survives; a refresh token is rejected as a Bearer
+  credential; an access token is rejected in the refresh field; expired,
+  missing-exp, malformed-exp, wrong-type, unknown-`sid` and wrong-subject
+  tokens are rejected without revoking anything; idempotent repeat; database
+  revocation retained when the Redis delete raises; an access-cache `exists`
+  outage does not block the refresh endpoint; missing, non-object and malformed
+  bodies and a missing field return `422`; a malformed `refresh_token` value
+  returns `422` without echoing the token; a token used as an extra field name
+  is ignored and never reflected; the original logout route still accepts any
+  body with a valid Bearer, still ignores a refresh body without a Bearer, and
+  keeps its `204`/`401` behavior; and two deterministic PostgreSQL races where
+  logout queues on `FOR UPDATE` behind an in-flight refresh, for both the
+  refresh-endpoint and access-token paths. Full suite 276 passed on a fresh
+  database and a fresh isolated Redis database; Ruff, Mypy (39 files) and
+  `git diff --check` are clean.
+
 ## 2026-11-07: Blocking an account left its sessions alive
 
 - `PATCH /api/v1/admin/users/{id}/block` only flipped `is_active`; it did not
