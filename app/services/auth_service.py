@@ -1,4 +1,5 @@
 import hashlib
+import math
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -248,11 +249,108 @@ def logout_session(
     *,
     session_id: str,
 ) -> bool:
-    session = db.query(UserSession).filter(UserSession.id == UUID(session_id)).first()
+    """Revoke one session while holding its own row lock.
+
+    Refresh rotation takes the same lock, so a rotation that is already in
+    flight either commits first (and its freshly issued token is then dead) or
+    waits here and observes ``revoked_at`` after this revocation commits.
+    """
+    try:
+        sid = UUID(str(session_id))
+    except ValueError:
+        return False
+    session = (
+        db.query(UserSession)
+        .filter(UserSession.id == sid)
+        # Re-read a cached instance and serialize with refresh rotation.
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
     if not session:
         return False
     if session.revoked_at is None:
         session.revoked_at = datetime.now(UTC)
-        db.commit()
-    redis_client.delete(f"session:{session_id}")
+    db.commit()
+    try:
+        redis_client.delete(f"session:{sid}")
+    except RedisError:
+        # The database row is authoritative; cache eviction is best-effort.
+        pass
     return True
+
+
+def logout_session_with_refresh_token(
+    db: Session,
+    settings: Settings,
+    redis_client,
+    *,
+    refresh_token: str,
+) -> tuple[UUID, str]:
+    """Revoke the session named by a signed refresh token.
+
+    An older, already-rotated refresh token can still end its own session, so a
+    client whose access token expired can log out with a stale refresh cookie.
+    The token is never used to authenticate, and its ``sid`` can only select the
+    session it is bound to, so it can never revoke a different session. The
+    stored hash of the current jti is deliberately not required here.
+    """
+    try:
+        payload = jwt_service.decode_token(settings, refresh_token)
+    except (jwt.PyJWTError, TypeError, ValueError, OverflowError) as e:
+        raise ValueError("Invalid refresh token") from e
+
+    # ``decode_token`` validates ``exp`` only when the claim is present. Logout
+    # requires an explicit finite expiry, so reject a missing or malformed
+    # value locally instead of treating it as an unbounded credential. PyJWT
+    # still enforces that a present expiry is in the future.
+    exp = payload.get("exp")
+    if isinstance(exp, bool) or not isinstance(exp, int | float):
+        raise ValueError("Invalid refresh token expiry")
+    try:
+        finite_exp = math.isfinite(exp)
+    except OverflowError:
+        # ``math.isfinite`` converts to float, so an arbitrarily large integer
+        # ``exp`` overflows that conversion. Such a claim cannot be a real
+        # refresh expiry; reject it as malformed rather than raising a 500.
+        raise ValueError("Invalid refresh token expiry") from None
+    if not finite_exp:
+        raise ValueError("Invalid refresh token expiry")
+
+    if payload.get("type") != "refresh":
+        raise ValueError("Invalid token type")
+
+    sid = payload.get("sid")
+    sub = payload.get("sub")
+    jti = payload.get("jti")
+    if not sid or not sub or not jti:
+        raise ValueError("Invalid refresh token payload")
+    try:
+        session_uuid = UUID(str(sid))
+        user_uuid = UUID(str(sub))
+    except ValueError as e:
+        raise ValueError("Invalid refresh token payload") from e
+
+    session = (
+        db.query(UserSession)
+        .filter(UserSession.id == session_uuid)
+        # Re-read and serialize with refresh rotation and access-token logout.
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if session is None:
+        raise ValueError("Session not found")
+    if session.user_id != user_uuid:
+        # The token's subject must match the session it names; a token for one
+        # account cannot be used to revoke another account's session.
+        raise ValueError("Refresh token subject mismatch")
+
+    if session.revoked_at is None:
+        session.revoked_at = datetime.now(UTC)
+    db.commit()
+    try:
+        redis_client.delete(f"session:{session_uuid}")
+    except RedisError:
+        pass
+    return user_uuid, str(session_uuid)
