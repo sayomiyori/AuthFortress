@@ -1,5 +1,30 @@
 # Verified Defects and Regression Checks
 
+## 2026-10-12: Image inherited an outdated package installer
+
+The actual previous image package inventory included pip 25.0.1. Its advisory
+audit reported 12 rows representing six unique advisory IDs; application package
+pins were unaffected. Upgrade pip before installing the existing pinned
+requirements, then audit the newly built image inventory and run pip check.
+
+## 2026-10-12: Validation diagnostics echoed authentication payloads
+
+A registration request without username returned HTTP 422 containing the whole
+request body, including its password. The default RequestValidationError handler
+serialized Pydantic input/context diagnostics. Sanitize those two fields globally
+while retaining the existing 422 status and detail/type/loc/msg structure.
+Four regressions cover incomplete registration/login/2FA and malformed refresh
+payloads; synthetic markers must never appear in the response.
+
+## 2026-10-12: Refresh race verifier ignored the selected test infrastructure
+
+The database race script hardcoded PostgreSQL 55432 and Redis 56379, even with
+explicit isolated test URLs. A rerun against random loopback ports failed to
+connect. It now requires `TEST_DATABASE_URL` naming a test database and
+`TEST_REDIS_URL` selecting /15, matching the suite guard. The rerun proved one
+successful token rotation from two independent PostgreSQL transactions. Application
+auth behavior and migrations are unchanged.
+
 ## 2026-10-09: Registration race and audit responsiveness
 
 - Concurrent registration passed the email pre-check twice, then returned 500

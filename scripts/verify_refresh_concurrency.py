@@ -1,6 +1,7 @@
 """Check single-use refresh rotation through concurrent HTTP requests."""
 
 import argparse
+import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -11,17 +12,23 @@ from app.models.user import User
 from app.services.auth_service import create_session_and_tokens, refresh_tokens
 from redis import Redis
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 
 def verify_database_race() -> None:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    redis_url = os.environ.get("TEST_REDIS_URL")
+    if (not database_url or not (make_url(database_url).database or "").endswith("test")
+            or not redis_url or not redis_url.endswith("/15")):
+        raise RuntimeError("Explicit isolated TEST_DATABASE_URL and TEST_REDIS_URL /15 required")
     settings = Settings(
         _env_file=None,
-        DATABASE_URL="postgresql+psycopg2://authfortress_test:local-test-only@localhost:55432/authfortress_test",
+        DATABASE_URL=database_url,
         JWT_SECRET_KEY="isolated-concurrency-test-key-at-least-32-characters",
     )
     engine = create_engine(settings.database_url)
-    redis_client = Redis.from_url("redis://localhost:56379/14", decode_responses=True)
+    redis_client = Redis.from_url(redis_url, decode_responses=True)
     with Session(engine) as db:
         user = User(email=f"race-{uuid.uuid4().hex}@example.com", username="race")
         db.add(user)
